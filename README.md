@@ -1,32 +1,31 @@
-<p align="center">
-  <a href="https://graphifylabs.ai"><img src="https://raw.githubusercontent.com/safishamsi/graphify/v4/docs/logo-text.svg" width="260" height="64" alt="Graphify"/></a>
-</p>
+# graphify-okf
 
-<p align="center">
-  🇺🇸 <a href="README.md">English</a> | 🇨🇳 <a href="docs/translations/README.zh-CN.md">简体中文</a> | 🇯🇵 <a href="docs/translations/README.ja-JP.md">日本語</a> | 🇰🇷 <a href="docs/translations/README.ko-KR.md">한국어</a> | 🇩🇪 <a href="docs/translations/README.de-DE.md">Deutsch</a> | 🇫🇷 <a href="docs/translations/README.fr-FR.md">Français</a> | 🇪🇸 <a href="docs/translations/README.es-ES.md">Español</a> | 🇮🇳 <a href="docs/translations/README.hi-IN.md">हिन्दी</a> | 🇧🇷 <a href="docs/translations/README.pt-BR.md">Português</a> | 🇷🇺 <a href="docs/translations/README.ru-RU.md">Русский</a> | 🇸🇦 <a href="docs/translations/README.ar-SA.md">العربية</a> | 🇮🇷 <a href="docs/translations/README.fa-IR.md">فارسی</a> | 🇮🇹 <a href="docs/translations/README.it-IT.md">Italiano</a> | 🇵🇱 <a href="docs/translations/README.pl-PL.md">Polski</a> | 🇳🇱 <a href="docs/translations/README.nl-NL.md">Nederlands</a> | 🇹🇷 <a href="docs/translations/README.tr-TR.md">Türkçe</a> | 🇺🇦 <a href="docs/translations/README.uk-UA.md">Українська</a> | 🇻🇳 <a href="docs/translations/README.vi-VN.md">Tiếng Việt</a> | 🇮🇩 <a href="docs/translations/README.id-ID.md">Bahasa Indonesia</a> | 🇸🇪 <a href="docs/translations/README.sv-SE.md">Svenska</a> | 🇬🇷 <a href="docs/translations/README.el-GR.md">Ελληνικά</a> | 🇷🇴 <a href="docs/translations/README.ro-RO.md">Română</a> | 🇨🇿 <a href="docs/translations/README.cs-CZ.md">Čeština</a> | 🇫🇮 <a href="docs/translations/README.fi-FI.md">Suomi</a> | 🇩🇰 <a href="docs/translations/README.da-DK.md">Dansk</a> | 🇳🇴 <a href="docs/translations/README.no-NO.md">Norsk</a> | 🇭🇺 <a href="docs/translations/README.hu-HU.md">Magyar</a> | 🇹🇭 <a href="docs/translations/README.th-TH.md">ภาษาไทย</a> | 🇺🇿 <a href="docs/translations/README.uz-UZ.md">Oʻzbekcha</a> | 🇹🇼 <a href="docs/translations/README.zh-TW.md">繁體中文</a> | 🇵🇭 <a href="docs/translations/README.fil-PH.md">Filipino</a>
-</p>
+[![Fork](https://img.shields.io/badge/fork-alderac%2Fgraphify--okf-blue)](https://github.com/alderac/graphify-okf)
+[![Upstream](https://img.shields.io/badge/upstream-safishamsi%2Fgraphify-lightgrey)](https://github.com/safishamsi/graphify)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 
-<p align="center">
-  <a href="https://www.ycombinator.com/companies/graphify"><img src="https://img.shields.io/badge/Y%20Combinator-S26-F0652F?style=flat&logo=ycombinator&logoColor=white" alt="YC S26"/></a>
-  <a href="https://discord.gg/598Ad9zQZ"><img src="https://img.shields.io/badge/Discord-Join-5865F2?style=flat&logo=discord&logoColor=white" alt="Discord"/></a>
-  <a href="https://safishamsi.gumroad.com/l/qetvlo"><img src="https://img.shields.io/badge/Book-The%20Memory%20Layer-2ea44f?style=flat&logo=gitbook&logoColor=white" alt="The Memory Layer"/></a>
-  <a href="https://github.com/safishamsi/graphify/actions/workflows/ci.yml"><img src="https://github.com/safishamsi/graphify/actions/workflows/ci.yml/badge.svg?branch=v8" alt="CI"/></a>
-  <a href="https://pypi.org/project/graphifyy/"><img src="https://img.shields.io/pypi/v/graphifyy" alt="PyPI"/></a>
-  <a href="https://pepy.tech/project/graphifyy"><img src="https://img.shields.io/pepy/dt/graphifyy?color=blue&label=downloads" alt="Downloads"/></a>
-  <a href="https://github.com/sponsors/safishamsi"><img src="https://img.shields.io/badge/sponsor-safishamsi-ea4aaa?logo=github-sponsors" alt="Sponsor"/></a>
-  <a href="https://www.linkedin.com/company/graphify-labs"><img src="https://img.shields.io/badge/LinkedIn-Graphify%20Labs-0077B5?logo=linkedin" alt="LinkedIn"/></a>
-  <a href="https://x.com/graphifyy"><img src="https://img.shields.io/badge/X-graphifyy-000000?logo=x&logoColor=white" alt="X"/></a>
-</p>
+> **Fork notice:** this repository is `alderac/graphify-okf`, a public fork of
+> [`safishamsi/graphify`](https://github.com/safishamsi/graphify). It is not the
+> upstream project homepage, support channel, or PyPI release channel.
 
-<p align="center">
-  <a href="https://star-history.com/#safishamsi/graphify&Date">
-    <img src="https://api.star-history.com/svg?repos=safishamsi/graphify&type=Date" alt="Star History Chart" width="370"/>
-  </a>
-</p>
+Type `/graphify` in your AI coding assistant and it maps your project - code,
+docs, PDFs, images, and videos - into a knowledge graph you can query instead
+of grepping through files.
 
-Type `/graphify` in your AI coding assistant and it maps your entire project — code, docs, PDFs, images, videos — into a knowledge graph you can query instead of grepping through files.
+This fork keeps Graphify's core CLI and extraction pipeline, and adds an
+OKF-compatible Obsidian export path. When `--obsidian` is used, graphify-okf
+emits Markdown notes for concepts and communities while preserving Graphify
+tags, source metadata, and graph identifiers as producer-defined OKF
+frontmatter.
 
-**graphify-okf** is a public fork that emits OKF-compatible Obsidian vaults while preserving Graphify tags and graph metadata as producer-defined OKF frontmatter.
+| Project | Use it for |
+|---|---|
+| `alderac/graphify-okf` | OKF-compatible Obsidian vault exports and fork experimentation. |
+| `safishamsi/graphify` | The canonical upstream project, published package, community links, and upstream support. |
+
+The Python package name and CLI command remain `graphifyy` and `graphify` for
+compatibility. Unless this fork has published an explicit release, installing
+`graphifyy` from PyPI installs upstream Graphify, not this fork.
 
 Works in Claude Code, Codex, OpenCode, Kilo Code, Cursor, Gemini CLI, GitHub Copilot CLI, VS Code Copilot Chat, Aider, Amp, OpenClaw, Factory Droid, Trae, Hermes, Kimi Code, Kiro, Pi, Devin CLI, and Google Antigravity.
 
@@ -34,7 +33,7 @@ Works in Claude Code, Codex, OpenCode, Kilo Code, Cursor, Gemini CLI, GitHub Cop
 /graphify .
 ```
 
-That's it. You get three files:
+That's it. You get:
 
 ```
 graphify-out/
@@ -52,6 +51,19 @@ For a readable architecture page with Mermaid call-flow diagrams, run:
 ```bash
 graphify export callflow-html
 ```
+
+### OKF Obsidian output
+
+The fork-specific Obsidian export writes an OKF bundle rooted at
+`graphify-out/obsidian/index.md`. Concept notes live under `concepts/`,
+community notes live under `communities/`, and non-index Markdown files include
+frontmatter such as:
+
+- `type`: `Graphify Code Concept` or `Graphify Community`
+- `graphify_id`, `graphify_file_type`, `graphify_source_file`, and
+  `graphify_source_location`
+- `graphify_community` and `graphify_tags`
+- standard Markdown links instead of Obsidian-only wikilinks
 
 ---
 
@@ -84,26 +96,48 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## Install
 
-> **Official package:** The PyPI package is `graphifyy` (double-y). Other `graphify*` packages on PyPI are not affiliated. The CLI command is still `graphify`.
+### Install this fork
 
-**Step 1 — install the package:**
+Install from this repository when you need the OKF Obsidian export behavior:
 
 ```bash
-# Recommended (isolated env; if 'graphify' isn't found after, run: uv tool update-shell):
+# User-level CLI install from GitHub:
+uv tool install "git+https://github.com/alderac/graphify-okf.git"
+
+# Or, for local development:
+git clone https://github.com/alderac/graphify-okf.git
+cd graphify-okf
+uv sync --all-extras
+uv run graphify --version
+```
+
+If `graphify` is not found after a `uv tool install`, run `uv tool update-shell`
+and open a new terminal.
+
+### Install upstream Graphify
+
+Install from PyPI when you want the canonical upstream package:
+
+```bash
+# Recommended for upstream Graphify:
 uv tool install graphifyy
 
 # Alternatives:
 pipx install graphifyy
-pip install graphifyy  # may need PATH setup — see note below
+pip install graphifyy  # may need PATH setup; uv or pipx is preferred
 ```
 
-**Step 2 — register the skill with your AI assistant:**
+The published package is `graphifyy` (double-y), and the CLI command is
+`graphify`. Other `graphify*` packages on PyPI are not affiliated with upstream
+Graphify or this fork.
+
+### Register the assistant skill
 
 ```bash
 graphify install
 ```
 
-That's it. Open your AI assistant and type `/graphify .`
+Open your AI assistant and type `/graphify .` after the skill is installed.
 
 To install the assistant skill into the current repository instead of your user
 profile, add `--project`:
@@ -124,7 +158,7 @@ for example `graphify claude install --project` or `graphify codex install --pro
 
 > **`graphify: command not found`?** `uv tool install` / `pipx install` put the `graphify` command in their tool bin dir (`~/.local/bin`). If your shell can't find it right after install — common on a fresh macOS + zsh setup — that dir isn't on your `PATH` yet: run `uv tool update-shell` (or `pipx ensurepath`), then open a new terminal. With plain `pip`, add `~/.local/bin` (Linux) or `~/Library/Python/3.x/bin` (Mac) to your PATH, or run `python -m graphify`.
 
-> **Running with `uvx` / `uv tool run` instead of installing?** Name the package, not the command: `uvx --from graphifyy graphify install`. Plain `uvx graphify …` fails (`No solution found … no versions of graphify`) because `uv tool run` reads the first word as a *package*, and the package is `graphifyy` — the `graphify` command lives inside it.
+> **Running with `uvx` / `uv tool run` instead of installing?** Name the package or source, not the command: `uvx --from graphifyy graphify install` for upstream PyPI, or `uvx --from "git+https://github.com/alderac/graphify-okf.git" graphify install` for this fork. Plain `uvx graphify ...` fails (`No solution found ... no versions of graphify`) because `uv tool run` reads the first word as a package, and the package is `graphifyy` - the `graphify` command lives inside it.
 
 > **Avoid `pip install` on Mac/Windows** if possible. The skill resolves Python at runtime from `graphify-out/.graphify_python`; if that points to a different environment than where `pip` installed the package, you'll get `ModuleNotFoundError: No module named 'graphify'`. `uv tool install` and `pipx install` isolate the package in their own env and avoid this entirely.
 
@@ -166,7 +200,10 @@ Codex users also need `multi_agent = true` under `[features]` in `~/.codex/confi
 
 ### Optional extras
 
-Install only what you need:
+Install only what you need. The short commands below use the published package
+name; for this fork, install extras from a clone with `uv sync --all-extras` or
+use a Git requirement such as
+`uv tool install "graphifyy[pdf] @ git+https://github.com/alderac/graphify-okf.git"`.
 
 | Extra | What it adds | Install |
 |---|---|---|
@@ -531,7 +568,7 @@ graphify install  # overwrites the skill file
 /graphify ./raw --directed         # preserve edge direction
 /graphify ./raw --cluster-only     # rerun clustering on existing graph
 /graphify ./raw --no-viz           # skip HTML visualization
-/graphify ./raw --obsidian         # generate Obsidian vault
+/graphify ./raw --obsidian         # generate OKF-compatible Obsidian vault
 /graphify ./raw --obsidian --obsidian-dir ~/vault  # write into an existing vault (never overwrites your own notes or .obsidian config)
 /graphify ./raw --wiki             # build agent-crawlable markdown wiki
 /graphify ./raw --svg              # export graph.svg
@@ -685,13 +722,18 @@ graphify label ./my-project --backend=openai --model gpt-4o   # force a specific
 
 ---
 
-## Built on graphify — Penpax
+## Upstream Credit And Fork Scope
 
-[**Penpax**](https://graphifylabs.ai) is the always-on layer built on top of graphify — it applies the same graph approach to your entire working life: meetings, browser history, emails, files, and code, updating continuously in the background.
+graphify-okf is built from upstream
+[`safishamsi/graphify`](https://github.com/safishamsi/graphify). Upstream owns
+the original Graphify project, package identity, community links, and general
+support path.
 
-Built for people whose work lives across hundreds of conversations and documents they can never fully reconstruct. No cloud, fully on-device.
-
-**Free trial launching soon.** [Join the waitlist →](https://graphifylabs.ai)
+This fork focuses on OKF-compatible Obsidian output and any changes needed to
+make that export safe, inspectable, and useful. When reporting an issue, open it
+against this fork if it involves OKF frontmatter, fork install instructions, or
+the `--obsidian` vault layout. For general Graphify behavior that reproduces in
+upstream, report it upstream.
 
 ---
 
@@ -703,9 +745,8 @@ Built for people whose work lives across hundreds of conversations and documents
 The project uses [uv](https://docs.astral.sh/uv/) for dev workflow. Install it once, then:
 
 ```bash
-git clone https://github.com/safishamsi/graphify.git
-cd graphify
-git checkout v8                        # active development branch
+git clone https://github.com/alderac/graphify-okf.git
+cd graphify-okf
 
 # Create the project venv and install graphify + all extras + the dev group
 # (pytest). uv installs the dev dependency group by default; pass --no-dev to
@@ -731,7 +772,9 @@ uv run pytest tests/ -q -k "python"    # filter by name
 
 ### Git workflow
 
-- Active development happens on the `v8` branch.
+- Active fork development happens on `main`.
+- Keep the `upstream` remote pointed at `https://github.com/safishamsi/graphify.git`
+  when syncing upstream Graphify changes into this fork.
 - Commit style: `fix: <description>` / `feat: <description>` / `docs: <description>`
 - Before opening a PR, run `uv run pytest tests/ -q` and confirm it passes.
 - Add a fixture file to `tests/fixtures/` and tests to `tests/test_languages.py` for any new language extractor.
