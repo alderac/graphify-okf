@@ -864,6 +864,21 @@ def _is_no_api_key_fix_line(line: str) -> bool:
     return "graphify needs no API key" in line
 
 
+def _is_svg_asset_grouping_line(line: str) -> bool:
+    """Whether a line is the semantic chunking SVG asset-family guidance.
+
+    The old chunking rule isolated every image. The updated rule preserves that
+    behavior for raster/vision files but keeps related SVG props/icons in the
+    same directory together, because the semantic relationship between variants
+    is the data model surface being extracted.
+    """
+    return (
+        "Each image gets its own chunk (vision needs separate context)." in line
+        or "Each raster/vision image gets its own chunk (vision needs separate context)." in line
+        or "related `.svg` asset files in the same directory" in line
+    )
+
+
 # Every line that may differ between a rendered monolith and its pristine v8
 # baseline. Each predicate documents one sanctioned change-class; a blank line is
 # allowed because the multi-line fix blocks insert spacing. Anything else failing
@@ -878,6 +893,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_zero_node_guard_fix_line,
     _is_manifest_root_fix_line,
     _is_no_api_key_fix_line,
+    _is_svg_asset_grouping_line,
 )
 
 
@@ -895,7 +911,8 @@ def monolith_roundtrip(platform: Platform) -> list[str]:
     enumerated as predicates in ``_SANCTIONED_MONOLITH_DIFFS``: the file_type enum
     unification, the unified frontmatter description, the chunk-cleanup rewrite
     (#1172), and the four #1392 runbook fixes (directed propagation, content-only
-    semantic scope, stale-cache unlink, and the zero-node/shrink-guard ordering).
+    semantic scope, stale-cache unlink, and the zero-node/shrink-guard ordering),
+    plus narrowly reviewed skill guidance corrections.
 
     The comparison is a multiset diff, not a positional zip: a line whose text is
     unchanged but merely *moved* (the report-write line shifted below ``to_json``

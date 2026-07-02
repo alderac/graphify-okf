@@ -531,6 +531,22 @@ def test_monoliths_carry_the_1392_runbook_fixes():
         assert "if not wrote:" in body
 
 
+def test_semantic_chunking_groups_related_svg_assets():
+    """SVG asset families should be extracted together, not one subagent per file."""
+    platforms = gen.load_platforms()
+    expected = (
+        "Exception: related `.svg` asset files in the same directory "
+        "(for example UI props/icons) should stay together in one chunk"
+    )
+
+    split_body = gen.render(platforms["claude"])[0].content
+    assert expected in split_body
+
+    for key in ("aider", "devin"):
+        body = gen.render(platforms[key])[0].content
+        assert expected in body
+
+
 def test_generated_runbooks_pass_root_to_save_manifest():
     """#1417: every save_manifest call in a shipped runbook threads root=.
 
