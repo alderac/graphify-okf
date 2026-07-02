@@ -140,6 +140,37 @@ def test_ts_export_star_from_index_resolves_imported_symbol_to_origin(tmp_path: 
     assert _has_symbol_edge(result, "src/routes/page.ts", "src/lib/foo.ts", "Foo")
 
 
+def test_ts_reexport_to_colliding_file_id_keeps_endpoints_connected(tmp_path: Path):
+    target = _write(
+        tmp_path / "src/features/show-structure/types.ts",
+        "export const StructureType = 1\n",
+    )
+    colliding_target = _write(
+        tmp_path / "tests/features/show-structure/types.ts",
+        "export const OtherType = 2\n",
+    )
+    barrel = _write(
+        tmp_path / "functions/src/index.ts",
+        "export { StructureType } from '../../src/features/show-structure/types'\n",
+    )
+    colliding_barrel = _write(tmp_path / "app/src/index.ts", "export const app = 1\n")
+
+    result = _extract_for([target, colliding_target, barrel, colliding_barrel], tmp_path)
+    node_ids = {node["id"] for node in result["nodes"]}
+    barrel_edges = [
+        edge for edge in result["edges"]
+        if str(edge.get("source_file", "")).replace("\\", "/").endswith("functions/src/index.ts")
+        and edge.get("relation") in {"imports_from", "re_exports", "imports"}
+    ]
+    dangling = [
+        edge for edge in barrel_edges
+        if edge.get("source") not in node_ids or edge.get("target") not in node_ids
+    ]
+
+    assert barrel_edges, "expected barrel import/re-export edges from functions/src/index.ts"
+    assert not dangling
+
+
 @pytest.mark.parametrize("suffix", ["ts", "js"])
 def test_js_namespace_reexport_import_targets_real_binding(
     tmp_path: Path,
