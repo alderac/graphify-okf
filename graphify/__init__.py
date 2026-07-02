@@ -18,6 +18,8 @@ def __getattr__(name):
         "to_html": ("graphify.export", "to_html"),
         "to_svg": ("graphify.export", "to_svg"),
         "to_canvas": ("graphify.export", "to_canvas"),
+        "to_okf_obsidian": ("graphify.export", "to_okf_obsidian"),
+        "to_obsidian_okf": ("graphify.export", "to_obsidian_okf"),
         "to_wiki": ("graphify.wiki", "to_wiki"),
         "reflect": ("graphify.reflect", "reflect"),
         "save_query_result": ("graphify.ingest", "save_query_result"),

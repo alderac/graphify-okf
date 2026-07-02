@@ -4194,14 +4194,14 @@ def main() -> None:
                     sys.exit(0)
 
         elif subcmd == "obsidian":
-            from graphify.export import to_obsidian as _to_obsidian, to_canvas as _to_canvas
-            n = _to_obsidian(G, communities, str(obsidian_dir),
-                             community_labels=labels or None, cohesion=cohesion or None)
-            print(f"Obsidian vault: {n} notes in {obsidian_dir}/")
-            _to_canvas(G, communities, str(obsidian_dir / "graph.canvas"),
-                       community_labels=labels or None)
-            print(f"Canvas: {obsidian_dir}/graph.canvas")
+            from graphify.export import to_okf_obsidian as _to_okf_obsidian
+            n = _to_okf_obsidian(G, communities, str(obsidian_dir),
+                                 community_labels=labels or None, cohesion=cohesion or None)
+            print(f"OKF Obsidian vault: {n} concept/community notes in {obsidian_dir}/")
             print(f"Open {obsidian_dir}/ as a vault in Obsidian.")
+            print(f"  {obsidian_dir}/index.md        -> OKF bundle root index")
+            print(f"  {obsidian_dir}/concepts/       -> one OKF concept note per Graphify node")
+            print(f"  {obsidian_dir}/communities/    -> one OKF concept note per Graphify community")
 
         elif subcmd == "wiki":
             from graphify.wiki import to_wiki as _to_wiki

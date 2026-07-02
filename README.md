@@ -26,6 +26,8 @@
 
 Type `/graphify` in your AI coding assistant and it maps your entire project — code, docs, PDFs, images, videos — into a knowledge graph you can query instead of grepping through files.
 
+**graphify-okf** is a public fork that emits OKF-compatible Obsidian vaults while preserving Graphify tags and graph metadata as producer-defined OKF frontmatter.
+
 Works in Claude Code, Codex, OpenCode, Kilo Code, Cursor, Gemini CLI, GitHub Copilot CLI, VS Code Copilot Chat, Aider, Amp, OpenClaw, Factory Droid, Trae, Hermes, Kimi Code, Kiro, Pi, Devin CLI, and Google Antigravity.
 
 ```
@@ -37,6 +39,10 @@ That's it. You get three files:
 ```
 graphify-out/
 ├── graph.html       open in any browser — click nodes, filter, search
+├── obsidian/        OKF Markdown vault when --obsidian is used
+│   ├── index.md
+│   ├── concepts/
+│   └── communities/
 ├── GRAPH_REPORT.md  the highlights: key concepts, surprising connections, suggested questions
 └── graph.json       the full graph — query it anytime without re-reading your files
 ```

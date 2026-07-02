@@ -11,7 +11,9 @@ import sys
 from collections import Counter
 from datetime import date
 from pathlib import Path
+from urllib.parse import quote
 import networkx as nx
+import yaml
 from networkx.readwrite import json_graph
 from graphify.security import sanitize_label
 from graphify.analyze import _node_community_map
@@ -908,6 +910,369 @@ def _dedup_node_filenames(G: nx.Graph, safe_name) -> dict[str, str]:
         used.add(candidate.lower())
         node_filenames[node_id] = candidate
     return node_filenames
+
+
+_GRAPHIFY_FILE_TYPE_TAG = {
+    "code": "graphify/code",
+    "document": "graphify/document",
+    "paper": "graphify/paper",
+    "image": "graphify/image",
+}
+
+_OKF_TYPE_BY_FILE_TYPE = {
+    "code": "Graphify Code Concept",
+    "document": "Graphify Document Concept",
+    "paper": "Graphify Paper Concept",
+    "image": "Graphify Image Concept",
+}
+
+
+def _okf_safe_filename(label: str) -> str:
+    cleaned = re.sub(
+        r'[\\/*?:"<>|#^[\]()]',
+        "",
+        label.replace("\r\n", " ").replace("\r", " ").replace("\n", " "),
+    )
+    cleaned = re.sub(r"\.(md|mdx|qmd|markdown)$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", "_", cleaned).strip("._- ")
+    if not re.search(r"\w", cleaned, flags=re.UNICODE):
+        return "unnamed"
+    return _cap_filename(cleaned, 180)
+
+
+def _okf_community_filenames(
+    communities: dict[int, list[str]],
+    community_labels: dict[int, str] | None,
+) -> dict[int, str]:
+    used: set[str] = set()
+    filenames: dict[int, str] = {}
+    for cid in sorted(communities):
+        base = _okf_safe_filename(_community_name(cid, community_labels))
+        candidate = base
+        n = 1
+        while candidate.lower() in used:
+            candidate = f"{base}_{n}"
+            n += 1
+        used.add(candidate.lower())
+        filenames[cid] = candidate
+    return filenames
+
+
+def _community_name(cid: int | None, community_labels: dict[int, str] | None) -> str:
+    if cid is None:
+        return "Community unknown"
+    if community_labels:
+        return community_labels.get(cid, f"Community {cid}")
+    return f"Community {cid}"
+
+
+def _okf_dominant_confidence(G: nx.Graph, node_id: str) -> str:
+    confidences = [
+        edata.get("confidence", "EXTRACTED")
+        for _, _, edata in G.edges(node_id, data=True)
+    ]
+    if not confidences:
+        return "EXTRACTED"
+    return Counter(confidences).most_common(1)[0][0]
+
+
+def _tag_token(value: str) -> str:
+    token = re.sub(r"\s+", "_", value.strip())
+    token = re.sub(r"[^A-Za-z0-9_/-]", "", token)
+    return token or "unknown"
+
+
+def _graphify_tags(file_type: str, confidence: str, community_name: str) -> list[str]:
+    file_type_tag = _GRAPHIFY_FILE_TYPE_TAG.get(
+        file_type,
+        f"graphify/{file_type}" if file_type else "graphify/document",
+    )
+    return [
+        file_type_tag,
+        f"graphify/{confidence}",
+        f"community/{_tag_token(community_name)}",
+    ]
+
+
+def _okf_type(file_type: str) -> str:
+    return _OKF_TYPE_BY_FILE_TYPE.get(file_type, "Graphify Concept")
+
+
+def _clean_frontmatter(value):
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in value.items():
+            next_item = _clean_frontmatter(item)
+            if next_item not in (None, "", [], {}):
+                cleaned[key] = next_item
+        return cleaned
+    if isinstance(value, list):
+        return [
+            item
+            for item in (_clean_frontmatter(item) for item in value)
+            if item not in (None, "", [], {})
+        ]
+    return value
+
+
+def _frontmatter(metadata: dict) -> list[str]:
+    dumped = yaml.safe_dump(
+        _clean_frontmatter(metadata),
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+    ).strip()
+    return ["---", dumped, "---"]
+
+
+def _md_link(label: str, bundle_path: str) -> str:
+    return f"[{label}]({quote(bundle_path, safe='/:._-')})"
+
+
+def _okf_description(data: dict, label: str) -> str:
+    explicit = data.get("description") or data.get("summary")
+    if explicit:
+        return explicit
+    source = data.get("source_file", "")
+    file_type = data.get("file_type", "concept") or "concept"
+    if source:
+        return f"Graphify {file_type} node extracted from {source}."
+    return f"Graphify {file_type} node for {label}."
+
+
+def to_okf_obsidian(
+    G: nx.Graph,
+    communities: dict[int, list[str]],
+    output_dir: str,
+    community_labels: dict[int, str] | None = None,
+    cohesion: dict[int, float] | None = None,
+) -> int:
+    """Export an OKF-compatible Obsidian vault.
+
+    The vault uses standard Markdown links and OKF frontmatter. Graphify's
+    existing Obsidian tags are preserved in both `tags` and `graphify_tags`
+    so Obsidian can index them while OKF consumers can distinguish producer
+    metadata from the canonical fields.
+    """
+    out = Path(output_dir)
+    concepts_dir = out / "concepts"
+    communities_dir = out / "communities"
+    out.mkdir(parents=True, exist_ok=True)
+
+    _manifest_path = out / ".graphify_okf_manifest.json"
+    try:
+        _owned: set[str] = set(json.loads(_manifest_path.read_text(encoding="utf-8")).get("files", []))
+    except (OSError, ValueError):
+        _owned = set()
+    _written: list[str] = []
+    _skipped: list[str] = []
+
+    def _owned_write(rel_name: str, content: str) -> bool:
+        target = out / rel_name
+        if target.exists() and rel_name not in _owned:
+            _skipped.append(rel_name)
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")  # nosec
+        _written.append(rel_name)
+        return True
+
+    node_community = _node_community_map(communities)
+    node_filename = _dedup_node_filenames(G, lambda label: _okf_safe_filename(str(label)))
+    community_filename = _okf_community_filenames(communities, community_labels)
+
+    node_notes_written = 0
+    for node_id, data in G.nodes(data=True):
+        label = data.get("label", node_id)
+        file_type = data.get("file_type", "")
+        cid = node_community.get(node_id)
+        community = _community_name(cid, community_labels)
+        confidence = _okf_dominant_confidence(G, node_id)
+        tags = _graphify_tags(file_type, confidence, community)
+
+        resource = data.get("source_url") or data.get("url")
+        timestamp = data.get("captured_at") or data.get("timestamp")
+        metadata = {
+            "type": _okf_type(file_type),
+            "title": label,
+            "description": _okf_description(data, label),
+            "resource": resource,
+            "timestamp": timestamp,
+            "tags": tags,
+            "graphify_id": node_id,
+            "graphify_file_type": file_type,
+            "graphify_source_file": data.get("source_file"),
+            "graphify_source_location": data.get("source_location"),
+            "graphify_source_url": data.get("source_url"),
+            "graphify_author": data.get("author"),
+            "graphify_contributor": data.get("contributor"),
+            "graphify_community_id": cid,
+            "graphify_community": community,
+            "graphify_dominant_confidence": confidence,
+            "graphify_degree": G.degree(node_id),
+            "graphify_tags": tags,
+        }
+
+        lines = _frontmatter(metadata)
+        lines += ["", f"# {label}", ""]
+
+        source_bits = []
+        if data.get("source_file"):
+            source_bits.append(f"Source file: `{data['source_file']}`")
+        if data.get("source_location"):
+            source_bits.append(f"Location: `{data['source_location']}`")
+        if source_bits:
+            lines += ["## Source", "", *source_bits, ""]
+
+        if cid in community_filename:
+            community_path = f"/communities/{community_filename[cid]}.md"
+            lines += ["## Community", "", _md_link(community, community_path), ""]
+
+        neighbors = list(G.neighbors(node_id))
+        if neighbors:
+            lines += ["## Connections", ""]
+            for neighbor in sorted(neighbors, key=lambda n: G.nodes[n].get("label", n)):
+                edge_data = G.edges[node_id, neighbor]
+                neighbor_label = G.nodes[neighbor].get("label", neighbor)
+                neighbor_path = f"/concepts/{node_filename[neighbor]}.md"
+                relation = edge_data.get("relation", "related")
+                edge_confidence = edge_data.get("confidence", "EXTRACTED")
+                if edge_data.get("_src") == node_id:
+                    direction = "outgoing"
+                elif edge_data.get("_tgt") == node_id:
+                    direction = "incoming"
+                else:
+                    direction = "related"
+                lines.append(
+                    f"- {direction}: {_md_link(neighbor_label, neighbor_path)} "
+                    f"- `{relation}` [{edge_confidence}]"
+                )
+            lines.append("")
+
+        rel_name = f"concepts/{node_filename[node_id]}.md"
+        if _owned_write(rel_name, "\n".join(lines)):
+            node_notes_written += 1
+
+    inter_community_edges: dict[int, dict[int, int]] = {cid: {} for cid in communities}
+    for u, v in G.edges():
+        cu = node_community.get(u)
+        cv = node_community.get(v)
+        if cu is not None and cv is not None and cu != cv:
+            inter_community_edges.setdefault(cu, {})
+            inter_community_edges.setdefault(cv, {})
+            inter_community_edges[cu][cv] = inter_community_edges[cu].get(cv, 0) + 1
+            inter_community_edges[cv][cu] = inter_community_edges[cv].get(cu, 0) + 1
+
+    community_notes_written = 0
+    for cid, members in sorted(communities.items()):
+        community = _community_name(cid, community_labels)
+        community_tag = f"community/{_tag_token(community)}"
+        coh_value = cohesion.get(cid) if cohesion else None
+        tags = ["graphify/community", community_tag]
+        metadata = {
+            "type": "Graphify Community",
+            "title": community,
+            "description": f"Graphify community containing {len(members)} concept nodes.",
+            "tags": tags,
+            "graphify_community_id": cid,
+            "graphify_community": community,
+            "graphify_member_count": len(members),
+            "graphify_cohesion": coh_value,
+            "graphify_tags": tags,
+        }
+
+        lines = _frontmatter(metadata)
+        lines += ["", f"# {community}", ""]
+        if coh_value is not None:
+            lines += [f"**Cohesion:** {coh_value:.2f}", ""]
+
+        lines += ["## Members", ""]
+        for node_id in sorted(members, key=lambda n: G.nodes[n].get("label", n)):
+            node_label = G.nodes[node_id].get("label", node_id)
+            node_path = f"/concepts/{node_filename[node_id]}.md"
+            lines.append(f"- {_md_link(node_label, node_path)}")
+        lines.append("")
+
+        cross = inter_community_edges.get(cid, {})
+        if cross:
+            lines += ["## Connected Communities", ""]
+            for other_cid, edge_count in sorted(cross.items(), key=lambda x: -x[1]):
+                other_name = _community_name(other_cid, community_labels)
+                other_path = f"/communities/{community_filename[other_cid]}.md"
+                edge_word = "edge" if edge_count == 1 else "edges"
+                lines.append(f"- {_md_link(other_name, other_path)} - {edge_count} {edge_word}")
+            lines.append("")
+
+        rel_name = f"communities/{community_filename[cid]}.md"
+        if _owned_write(rel_name, "\n".join(lines)):
+            community_notes_written += 1
+
+    concept_entries = [
+        (
+            G.nodes[node_id].get("label", node_id),
+            f"/concepts/{filename}.md",
+            G.nodes[node_id].get("source_file", ""),
+        )
+        for node_id, filename in node_filename.items()
+    ]
+    community_entries = [
+        (_community_name(cid, community_labels), f"/communities/{filename}.md")
+        for cid, filename in community_filename.items()
+    ]
+
+    root_lines = _frontmatter({"okf_version": "0.1", "producer": "graphify"})
+    root_lines += [
+        "",
+        "# Graphify OKF Bundle",
+        "",
+        "## Indexes",
+        "",
+        f"- {_md_link('Concepts', '/concepts/index.md')}",
+        f"- {_md_link('Communities', '/communities/index.md')}",
+        "",
+    ]
+    _owned_write("index.md", "\n".join(root_lines))
+
+    concept_index = ["# Concepts", ""]
+    for label, path, source in sorted(concept_entries, key=lambda item: item[0].lower()):
+        suffix = f" - `{source}`" if source else ""
+        concept_index.append(f"- {_md_link(label, path)}{suffix}")
+    _owned_write("concepts/index.md", "\n".join(concept_index))
+
+    community_index = ["# Communities", ""]
+    for label, path in sorted(community_entries, key=lambda item: item[0].lower()):
+        community_index.append(f"- {_md_link(label, path)}")
+    _owned_write("communities/index.md", "\n".join(community_index))
+
+    graph_config = {
+        "colorGroups": [
+            {
+                "query": f"tag:#{'community/' + _tag_token(_community_name(cid, community_labels))}",
+                "color": {"a": 1, "rgb": int(COMMUNITY_COLORS[cid % len(COMMUNITY_COLORS)].lstrip("#"), 16)},
+            }
+            for cid in sorted(communities)
+        ]
+    }
+    _owned_write(".obsidian/graph.json", json.dumps(graph_config, indent=2))
+
+    try:
+        _manifest_path.write_text(json.dumps({"files": sorted(set(_written))}, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    if _skipped:
+        shown = ", ".join(_skipped[:5]) + (f" (+{len(_skipped) - 5} more)" if len(_skipped) > 5 else "")
+        print(
+            f"[graphify] WARNING: skipped {len(_skipped)} pre-existing file(s) graphify "
+            f"did not create, to avoid overwriting your notes: {shown}. "
+            f"Export into an empty directory (or the default graphify-out/obsidian) "
+            f"to get the full OKF vault.",
+            file=sys.stderr,
+        )
+
+    return node_notes_written + community_notes_written
+
+
+to_obsidian_okf = to_okf_obsidian
 
 
 def to_obsidian(

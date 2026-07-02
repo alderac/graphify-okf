@@ -13,6 +13,7 @@ requires-python = ">=3.10"
 dependencies = [
     "networkx>=3.4",
     "numpy>=1.21",
+    "PyYAML",
     "rapidfuzz>=3.0",
     "tree-sitter>=0.23.0,<0.26",
     "tree-sitter-python>=0.23,<0.26",
@@ -43,9 +44,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/safishamsi/graphify"
-Repository = "https://github.com/safishamsi/graphify"
-Issues = "https://github.com/safishamsi/graphify/issues"
+Homepage = "https://github.com/alderac/graphify-okf"
+Repository = "https://github.com/alderac/graphify-okf"
+Issues = "https://github.com/alderac/graphify-okf/issues"
 
 [project.optional-dependencies]
 # starlette is pulled in transitively by mcp, but graphify/serve.py imports it
