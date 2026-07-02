@@ -9239,6 +9239,30 @@ def _rewire_unique_stub_nodes(nodes: list[dict], edges: list[dict]) -> None:
     nodes[:] = [node for node in nodes if node.get("id") not in drop_ids]
 
 
+def _drop_unresolved_symbol_import_edges(nodes: list[dict], edges: list[dict]) -> None:
+    """Remove JS symbol-level import/export edges that never resolved to a node."""
+    node_ids = {
+        node.get("id") for node in nodes
+        if isinstance(node.get("id"), str) and node.get("id")
+    }
+    js_suffixes = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue", ".svelte"}
+
+    def is_unresolved_js_symbol_edge(edge: dict) -> bool:
+        if edge.get("relation") not in {"imports", "re_exports"}:
+            return False
+        if edge.get("target") in node_ids:
+            return False
+        source_file = str(edge.get("source_file", ""))
+        if Path(source_file).suffix.lower() not in js_suffixes:
+            return False
+        return True
+
+    edges[:] = [
+        edge for edge in edges
+        if not is_unresolved_js_symbol_edge(edge)
+    ]
+
+
 def _js_source_path(source_file: str, root: Path) -> Path | None:
     if not source_file:
         return None
@@ -15796,6 +15820,8 @@ def extract(
     # single-definition god-node guard. Registered in graphify.resolver_registry so
     # a new language plugs in without editing this body (#1356 Swift, #1446 Python).
     run_language_resolvers(paths, per_file, all_nodes, all_edges)
+
+    _drop_unresolved_symbol_import_edges(all_nodes, all_edges)
 
     # Relativize source_file fields so paths are portable across machines (#555)
     for item in all_nodes + all_edges:
