@@ -2228,6 +2228,107 @@ def _clone_repo(
     return dest
 
 
+def _cmd_seed_hydrate_smoke() -> None:
+    if len(sys.argv) < 4 or sys.argv[2] != "hydrate-smoke":
+        print(
+            "Usage: graphify seed hydrate-smoke <path> [--json] [--keep-temp]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    source = Path(sys.argv[3]).resolve()
+    json_out = False
+    keep_temp = False
+    for arg in sys.argv[4:]:
+        if arg == "--json":
+            json_out = True
+        elif arg == "--keep-temp":
+            keep_temp = True
+        else:
+            print(f"error: unknown seed hydrate-smoke option {arg}", file=sys.stderr)
+            sys.exit(1)
+
+    if not source.exists():
+        print(f"error: path not found: {source}", file=sys.stderr)
+        sys.exit(1)
+    if not source.is_dir():
+        print(f"error: path must be a directory: {source}", file=sys.stderr)
+        sys.exit(1)
+
+    import subprocess
+    import tempfile
+
+    ignored = shutil.ignore_patterns(
+        ".git",
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+    )
+    temp_parent = Path(tempfile.mkdtemp(prefix="graphify-hydrate-"))
+    temp_project = temp_parent / source.name
+    try:
+        shutil.copytree(source, temp_project, ignore=ignored)
+        marker = temp_project / _GRAPHIFY_OUT / ".graphify_root"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(temp_project), encoding="utf-8")
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "graphify", "extract", str(temp_project), "--seed"],
+            cwd=temp_project,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+        audit_path = temp_project / _GRAPHIFY_OUT / "extraction-audit.json"
+        audit: dict = {}
+        if audit_path.exists():
+            try:
+                audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                audit = {}
+
+        cache = audit.get("cache") or {}
+        extraction = audit.get("extraction") or {}
+        misses = int(cache.get("semantic_cache_misses", -1))
+        output_tokens = int(extraction.get("output_tokens", -1))
+        failures = audit.get("strict_failures") or []
+        ok = (
+            proc.returncode == 0
+            and misses == 0
+            and output_tokens == 0
+            and not failures
+        )
+        payload = {
+            "ok": ok,
+            "temp_dir": str(temp_project),
+            "returncode": proc.returncode,
+            "semantic_cache_misses": misses,
+            "output_tokens": output_tokens,
+            "strict_failures": failures,
+        }
+        if json_out:
+            print(json.dumps(payload, indent=2))
+        else:
+            status = "OK" if ok else "FAILED"
+            print(f"hydrate smoke: {status}")
+            print(f"temp dir: {temp_project}")
+            print(f"return code: {proc.returncode}")
+            print(f"semantic cache misses: {misses}")
+            print(f"output tokens: {output_tokens}")
+            if failures:
+                print(f"strict failures: {len(failures)}")
+
+        if not ok:
+            sys.exit(1)
+    finally:
+        if not keep_temp:
+            shutil.rmtree(temp_parent, ignore_errors=True)
+
+
 def main() -> None:
     for _stream in (sys.stdout, sys.stderr):
         if _stream is not None and hasattr(_stream, "reconfigure"):
@@ -2329,7 +2430,8 @@ def main() -> None:
         print("    --half-life-days N      signal weight halves every N days (default 30)")
         print("    --min-corroboration N   distinct useful results to prefer a node (default 2)")
         print("  check-update <path>     check needs_update flag and notify if semantic re-extraction is pending (cron-safe)")
-        print("  cache status [path]   report semantic cache completeness")
+        print("  cache status [path]     report semantic cache completeness")
+        print("  seed hydrate-smoke      validate a reusable seed in a temp copy")
         print("  tree                    emit a D3 v7 collapsible-tree HTML for graph.json")
         print("    --graph PATH            path to graph.json (default graphify-out/graph.json)")
         print("    --output HTML           output path (default graphify-out/GRAPH_TREE.html)")
@@ -4333,6 +4435,9 @@ def main() -> None:
             print(_global_path())
         else:
             print("Usage: graphify global [add|remove|list|path]", file=sys.stderr); sys.exit(1)
+
+    elif cmd == "seed":
+        _cmd_seed_hydrate_smoke()
 
     elif cmd == "extract":
         # Headless full-pipeline extraction for CI / scripts (#698).
