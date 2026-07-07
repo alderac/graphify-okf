@@ -4864,8 +4864,13 @@ def main() -> None:
             try:
                 pg_result = introspect_postgres(cli_postgres_dsn)
             except (ConnectionError, ImportError) as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                sys.exit(1)
+                _audit_warning(
+                    audit,
+                    "chunk_failed",
+                    f"PostgreSQL introspection failed: {exc}",
+                    details={"introspection": "postgres", "dsn": cli_postgres_dsn},
+                )
+                _write_audit_and_exit(f"error: {exc}")
             print(f"[graphify extract] PostgreSQL: {len(pg_result['nodes'])} nodes, "
                   f"{len(pg_result['edges'])} edges")
 
@@ -4876,8 +4881,13 @@ def main() -> None:
             try:
                 cargo_result = introspect_cargo(target)
             except (ConnectionError, ImportError, OSError) as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                sys.exit(1)
+                _audit_warning(
+                    audit,
+                    "chunk_failed",
+                    f"Cargo introspection failed: {exc}",
+                    details={"introspection": "cargo", "target": str(target)},
+                )
+                _write_audit_and_exit(f"error: {exc}")
             print(f"[graphify extract] Cargo: {len(cargo_result['nodes'])} nodes, "
                   f"{len(cargo_result['edges'])} edges")
 
@@ -4894,10 +4904,6 @@ def main() -> None:
         }
         audit["extraction"]["input_tokens"] = merged.get("input_tokens", 0)
         audit["extraction"]["output_tokens"] = merged.get("output_tokens", 0)
-        _node_sf = {n.get("id"): n.get("source_file") for n in merged["nodes"] if isinstance(n, dict)}
-        for _e in merged["edges"]:
-            if isinstance(_e, dict) and not _e.get("source_file"):
-                _e["source_file"] = _node_sf.get(_e.get("source")) or _node_sf.get(_e.get("target")) or ""
         _audit_collisions(audit, list(merged.get("nodes", [])))
         _audit_source_attribution(audit, merged)
         if strict_mode:
@@ -4963,14 +4969,6 @@ def main() -> None:
 
             merged["nodes"] = _dedupe_nodes(merged["nodes"])
             merged["edges"] = _dedupe_edges(merged["edges"])
-            # Backfill source_file from endpoint nodes — this raw path bypasses
-            # build_from_json's backfill, and semantic edges sometimes omit it (#1279).
-            _node_sf = {n.get("id"): n.get("source_file") for n in merged["nodes"]}
-            for _e in merged["edges"]:
-                if not _e.get("source_file"):
-                    _e["source_file"] = (
-                        _node_sf.get(_e.get("source")) or _node_sf.get(_e.get("target")) or ""
-                    )
             _backup(graphify_out)
             graph_json_path.write_text(
                 json.dumps(merged, indent=2), encoding="utf-8"
