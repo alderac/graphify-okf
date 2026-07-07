@@ -5,6 +5,7 @@ VALID_FILE_TYPES = {"code", "document", "paper", "image", "rationale", "concept"
 VALID_CONFIDENCES = {"EXTRACTED", "INFERRED", "AMBIGUOUS"}
 REQUIRED_NODE_FIELDS = {"id", "label", "file_type", "source_file"}
 REQUIRED_EDGE_FIELDS = {"source", "target", "relation", "confidence", "source_file"}
+REQUIRED_HYPEREDGE_FIELDS = {"id", "label", "nodes", "relation", "source_file"}
 
 
 def validate_extraction(data: dict) -> list[str]:
@@ -83,6 +84,21 @@ def validate_extraction(data: dict) -> list[str]:
                     continue
                 if unmatched:
                     errors.append(f"Edge {i} {endpoint} '{val}' does not match any node id")
+
+    hyperedges = data.get("hyperedges", [])
+    if hyperedges is not None:
+        if not isinstance(hyperedges, list):
+            errors.append("'hyperedges' must be a list")
+        else:
+            for i, hyperedge in enumerate(hyperedges):
+                if not isinstance(hyperedge, dict):
+                    errors.append(f"Hyperedge {i} must be an object")
+                    continue
+                for field in REQUIRED_HYPEREDGE_FIELDS:
+                    if field not in hyperedge:
+                        errors.append(f"Hyperedge {i} missing required field '{field}'")
+                if "nodes" in hyperedge and not isinstance(hyperedge["nodes"], list):
+                    errors.append(f"Hyperedge {i} field 'nodes' must be a list")
 
     return errors
 

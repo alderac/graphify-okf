@@ -255,6 +255,8 @@ def _semantic_id_remap(nodes: list, root: str | None) -> dict:
         if not nid or not isinstance(nid, str) or not sf:
             continue
         sf_norm = _norm_source_file(str(sf), root) or str(sf)
+        if not root and (os.path.isabs(sf_norm) or sf_norm.startswith("/")):
+            continue  # no root to relativize; do not encode absolute paths into IDs
         rel = Path(sf_norm)
         if rel.is_absolute():
             continue  # can't relativize (no/failed root) — leave id untouched

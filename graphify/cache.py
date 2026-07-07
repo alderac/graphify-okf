@@ -239,6 +239,28 @@ def _relativize_source_files_in(payload: dict, root: Path) -> None:
             if rel == ".." or rel.startswith(".." + os.sep) or rel.startswith("../"):
                 continue  # escaped root — keep absolute
             item["source_file"] = rel.replace(os.sep, "/")
+    for collision in payload.get("collisions", []):
+        if not isinstance(collision, dict) or not isinstance(collision.get("sources"), list):
+            continue
+        sources = []
+        for source in collision["sources"]:
+            if not source:
+                sources.append(source)
+                continue
+            sp = Path(source)
+            if not sp.is_absolute():
+                sources.append(source)
+                continue
+            try:
+                rel = os.path.relpath(sp, root_resolved)
+            except (ValueError, OSError):
+                sources.append(source)
+                continue
+            if rel == ".." or rel.startswith(".." + os.sep) or rel.startswith("../"):
+                sources.append(source)
+                continue
+            sources.append(rel.replace(os.sep, "/"))
+        collision["sources"] = sources
 
 
 def _absolutize_source_files_in(payload: dict, root: Path) -> None:
@@ -267,6 +289,23 @@ def _absolutize_source_files_in(payload: dict, root: Path) -> None:
                 item["source_file"] = str(root_resolved / sp)
             except (TypeError, OSError):
                 continue
+    for collision in payload.get("collisions", []):
+        if not isinstance(collision, dict) or not isinstance(collision.get("sources"), list):
+            continue
+        sources = []
+        for source in collision["sources"]:
+            if not source:
+                sources.append(source)
+                continue
+            sp = Path(source)
+            if sp.is_absolute():
+                sources.append(source)
+                continue
+            try:
+                sources.append(str(root_resolved / sp))
+            except (TypeError, OSError):
+                sources.append(source)
+        collision["sources"] = sources
 
 
 def cache_dir(root: Path = Path("."), kind: str = "ast") -> Path:
@@ -474,11 +513,41 @@ def check_semantic_cache(
     return cached_nodes, cached_edges, cached_hyperedges, uncached
 
 
+def semantic_cache_collisions(
+    files: list[str],
+    root: Path = Path("."),
+) -> list[dict]:
+    """Return cached semantic collision metadata for ``files``.
+
+    ``check_semantic_cache`` keeps its long-standing four-value contract, so
+    audit-only metadata is read through this small companion helper.
+    """
+    collisions: list[dict] = []
+    seen: set[str] = set()
+    for fpath in files:
+        p = Path(fpath)
+        if not p.is_absolute():
+            p = Path(root) / p
+        result = load_cached(p, root, kind="semantic")
+        if result is None:
+            continue
+        for collision in result.get("collisions", []) or []:
+            if not isinstance(collision, dict):
+                continue
+            key = json.dumps(collision, sort_keys=True, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
+            collisions.append(collision)
+    return collisions
+
+
 def save_semantic_cache(
     nodes: list[dict],
     edges: list[dict],
     hyperedges: list[dict] | None = None,
     root: Path = Path("."),
+    collisions: list[dict] | None = None,
 ) -> int:
     """Save semantic extraction results to cache, keyed by source_file.
 
@@ -489,7 +558,9 @@ def save_semantic_cache(
     """
     from collections import defaultdict
 
-    by_file: dict[str, dict] = defaultdict(lambda: {"nodes": [], "edges": [], "hyperedges": []})
+    by_file: dict[str, dict] = defaultdict(
+        lambda: {"nodes": [], "edges": [], "hyperedges": [], "collisions": []}
+    )
     for n in nodes:
         src = n.get("source_file", "")
         if src:
@@ -502,6 +573,12 @@ def save_semantic_cache(
         src = h.get("source_file", "")
         if src:
             by_file[src]["hyperedges"].append(h)
+    for collision in collisions or []:
+        if not isinstance(collision, dict):
+            continue
+        for src in collision.get("sources", []) or []:
+            if src:
+                by_file[src]["collisions"].append(collision)
 
     saved = 0
     for fpath, result in by_file.items():

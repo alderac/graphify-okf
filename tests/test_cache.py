@@ -1,7 +1,16 @@
 """Tests for graphify/cache.py."""
 import pytest
 from pathlib import Path
-from graphify.cache import file_hash, cache_dir, load_cached, save_cached, cached_files, clear_cache, _body_content
+from graphify.cache import (
+    _body_content,
+    cache_dir,
+    cached_files,
+    clear_cache,
+    file_hash,
+    load_cached,
+    save_cached,
+    save_semantic_cache,
+)
 
 
 @pytest.fixture
@@ -387,6 +396,34 @@ def test_semantic_cache_survives_version_bump(tmp_path, monkeypatch):
     assert any(semantic_dir.glob("*.json")), (
         "semantic entries must survive both the version bump and AST cleanup"
     )
+
+
+def test_semantic_cache_preserves_collision_metadata(tmp_path):
+    from graphify.cache import semantic_cache_collisions
+
+    a = tmp_path / "a.md"
+    b = tmp_path / "b.md"
+    a.write_text("# A\n", encoding="utf-8")
+    b.write_text("# B\n", encoding="utf-8")
+    collision = {
+        "id": "shared_concept",
+        "sources": [str(a), str(b)],
+        "labels": ["Shared"],
+        "count": 2,
+    }
+
+    saved = save_semantic_cache(
+        [
+            {"id": "a_shared_concept", "source_file": str(a)},
+            {"id": "b_shared_concept", "source_file": str(b)},
+        ],
+        [],
+        collisions=[collision],
+        root=tmp_path,
+    )
+
+    assert saved == 2
+    assert semantic_cache_collisions([str(a), str(b)], root=tmp_path) == [collision]
 
 
 def test_save_cached_in_root_symlink_keeps_symlink_name(tmp_path):

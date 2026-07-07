@@ -135,3 +135,17 @@ def test_non_hashable_node_id_does_not_mask_valid_ids():
     errors = validate_extraction(data)
     assert any("non-hashable id" in e for e in errors)
     assert any("target" in e and "ghost" in e for e in errors)
+
+
+def test_validate_reports_hyperedge_missing_source_file():
+    errors = validate_extraction(
+        {
+            "nodes": [{"id": "a", "label": "A", "file_type": "document", "source_file": "a.md"}],
+            "edges": [],
+            "hyperedges": [
+                {"id": "h", "label": "H", "nodes": ["a", "b", "c"], "relation": "form"}
+            ],
+        }
+    )
+
+    assert any("Hyperedge 0 missing required field 'source_file'" in e for e in errors)

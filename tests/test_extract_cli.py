@@ -78,6 +78,157 @@ def test_extract_exits_nonzero_when_all_semantic_chunks_fail(
     )
 
 
+def test_extract_seed_fails_on_semantic_cache_miss(monkeypatch, tmp_path, capsys):
+    corpus = _make_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-key")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus), "--backend", "claude", "--out", str(out_dir), "--seed"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        mainmod.main()
+
+    assert exc_info.value.code == 1
+    audit_path = out_dir / "graphify-out" / "extraction-audit.json"
+    assert audit_path.exists()
+    import json
+
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit["mode"] == "seed"
+    assert audit["strict"] is True
+    assert audit["cache"]["semantic_cache_misses"] == 1
+    assert any(f["code"] == "semantic_cache_miss" for f in audit["strict_failures"])
+    assert "strict/seed mode failed" in capsys.readouterr().err
+
+
+def test_extract_strict_cache_hit_preserves_node_collision_audit(
+    monkeypatch, tmp_path, capsys
+):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a = corpus / "a.md"
+    b = corpus / "b.md"
+    a.write_text("# A\n", encoding="utf-8")
+    b.write_text("# B\n", encoding="utf-8")
+    out_dir = tmp_path / "out"
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-key")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+
+    def _colliding_extract(paths, **kwargs):
+        kwargs["on_chunk_done"](0, 1, {})
+        return {
+            "nodes": [
+                {"id": "shared_concept", "label": "Shared", "source_file": str(paths[0])},
+                {"id": "shared_concept", "label": "Shared", "source_file": str(paths[1])},
+            ],
+            "edges": [],
+            "hyperedges": [],
+            "input_tokens": 1,
+            "output_tokens": 1,
+        }
+
+    monkeypatch.setattr("graphify.llm.extract_corpus_parallel", _colliding_extract)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        [
+            "graphify",
+            "extract",
+            str(corpus),
+            "--backend",
+            "claude",
+            "--out",
+            str(out_dir),
+            "--no-cluster",
+        ],
+    )
+    with pytest.raises(SystemExit) as first:
+        mainmod.main()
+    assert first.value.code == 0
+    (out_dir / "graphify-out" / "manifest.json").unlink()
+
+    def _unexpected_extract(*_args, **_kwargs):
+        raise AssertionError("strict cache-hit run must not re-extract semantics")
+
+    monkeypatch.setattr("graphify.llm.extract_corpus_parallel", _unexpected_extract)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        [
+            "graphify",
+            "extract",
+            str(corpus),
+            "--backend",
+            "claude",
+            "--out",
+            str(out_dir),
+            "--strict",
+            "--no-cluster",
+        ],
+    )
+    with pytest.raises(SystemExit) as second:
+        mainmod.main()
+
+    assert second.value.code == 1
+    import json
+
+    audit = json.loads(
+        (out_dir / "graphify-out" / "extraction-audit.json").read_text(encoding="utf-8")
+    )
+    assert audit["cache"]["semantic_cache_hits"] == 2
+    assert any(collision["id"] == "shared_concept" for collision in audit["collisions"])
+    assert any(failure["code"] == "node_id_collision" for failure in audit["strict_failures"])
+    assert "strict/seed mode failed" in capsys.readouterr().err
+
+
+def test_extract_postgres_failure_writes_audit_before_exit(
+    monkeypatch, tmp_path, capsys
+):
+    corpus = _code_only_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    _clear_backend_keys(monkeypatch)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(
+        "graphify.pg_introspect.introspect_postgres",
+        lambda _dsn: (_ for _ in ()).throw(ConnectionError("pg down")),
+    )
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        [
+            "graphify",
+            "extract",
+            str(corpus),
+            "--out",
+            str(out_dir),
+            "--postgres",
+            "postgresql://example/db",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        mainmod.main()
+
+    assert exc_info.value.code == 1
+    audit_path = out_dir / "graphify-out" / "extraction-audit.json"
+    assert audit_path.exists()
+    import json
+
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert any(w["code"] == "chunk_failed" for w in audit["warnings"])
+    assert any(
+        w["details"].get("introspection") == "postgres"
+        for w in audit["warnings"]
+        if w["code"] == "chunk_failed"
+    )
+    assert "error: pg down" in capsys.readouterr().err
+
+
 def test_extract_succeeds_when_at_least_one_chunk_completes(
     monkeypatch, tmp_path
 ):
@@ -123,6 +274,102 @@ def test_extract_succeeds_when_at_least_one_chunk_completes(
     )
 
 
+def test_extract_audit_records_semantic_warning_and_backend_route(
+    monkeypatch, tmp_path
+):
+    corpus = _make_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-key")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+
+    def _chunk_warned(paths, **kwargs):
+        on_warning = kwargs.get("on_warning")
+        if on_warning:
+            on_warning(
+                {
+                    "code": "hollow_response",
+                    "message": "backend returned no usable nodes or edges",
+                    "details": {"source_file": str(paths[0]), "chunk_index": 0},
+                }
+            )
+        on_chunk = kwargs.get("on_chunk_done")
+        if on_chunk:
+            on_chunk(0, 1, {"nodes": [], "edges": [], "hyperedges": []})
+        return {
+            "nodes": [{"id": "readme", "label": "Readme", "source_file": str(paths[0])}],
+            "edges": [],
+            "hyperedges": [],
+            "input_tokens": 10,
+            "output_tokens": 5,
+        }
+
+    monkeypatch.setattr("graphify.llm.extract_corpus_parallel", _chunk_warned)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus), "--backend", "claude", "--out", str(out_dir)],
+    )
+
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
+
+    import json
+
+    audit = json.loads((out_dir / "graphify-out" / "extraction-audit.json").read_text())
+    assert audit["backend"]["route"] == "anthropic"
+    assert audit["backend"]["model"] == "claude-sonnet-4-6"
+    warning = next(w for w in audit["warnings"] if w["code"] == "hollow_response")
+    assert warning["source_file"].endswith("README.md")
+    assert warning["details"]["chunk_index"] == 0
+
+
+def test_extract_audit_records_returned_semantic_warnings(monkeypatch, tmp_path):
+    corpus = _make_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-key")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+
+    def _chunk_returned_warning(paths, **kwargs):
+        on_chunk = kwargs.get("on_chunk_done")
+        if on_chunk:
+            on_chunk(0, 1, {"nodes": [], "edges": [], "hyperedges": []})
+        return {
+            "nodes": [{"id": "readme", "label": "Readme", "source_file": str(paths[0])}],
+            "edges": [],
+            "hyperedges": [],
+            "warnings": [
+                {
+                    "code": "hollow_response",
+                    "message": "backend returned no usable nodes or edges",
+                    "details": {"source_file": str(paths[0]), "chunk_index": 0},
+                }
+            ],
+            "input_tokens": 10,
+            "output_tokens": 5,
+        }
+
+    monkeypatch.setattr("graphify.llm.extract_corpus_parallel", _chunk_returned_warning)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus), "--backend", "claude", "--out", str(out_dir)],
+    )
+
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
+
+    import json
+
+    audit = json.loads((out_dir / "graphify-out" / "extraction-audit.json").read_text())
+    warning = next(w for w in audit["warnings"] if w["code"] == "hollow_response")
+    assert warning["source_file"].endswith("README.md")
+    assert warning["details"]["chunk_index"] == 0
+
+
 def _code_only_corpus(tmp_path):
     """A corpus with only code — no docs/papers/images."""
     (tmp_path / "auth.py").write_text(
@@ -143,6 +390,86 @@ def _clear_backend_keys(monkeypatch):
         "OLLAMA_BASE_URL",
     ):
         monkeypatch.delenv(key, raising=False)
+
+
+def test_extract_writes_audit_on_code_only_success(monkeypatch, tmp_path):
+    corpus = _code_only_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    _clear_backend_keys(monkeypatch)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus), "--out", str(out_dir), "--no-cluster"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        mainmod.main()
+
+    assert exc_info.value.code == 0
+    import json
+
+    audit = json.loads((out_dir / "graphify-out" / "extraction-audit.json").read_text())
+    assert audit["mode"] == "explore"
+    assert audit["detected"]["code_files"] == 1
+    assert audit["cache"]["semantic_inputs"] == 0
+
+
+def test_extract_strict_fails_on_multifile_missing_edge_source_file(
+    monkeypatch, tmp_path, capsys
+):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "a.md").write_text("# A\n")
+    (corpus / "b.md").write_text("# B\n")
+    out_dir = tmp_path / "out"
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-key")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+
+    cached_nodes = [
+        {"id": "doc:a", "label": "A", "source_file": str(corpus / "a.md")},
+        {"id": "doc:b", "label": "B", "source_file": str(corpus / "b.md")},
+    ]
+    cached_edges = [
+        {"source": "doc:a", "target": "doc:b", "type": "relates_to"}
+    ]
+    monkeypatch.setattr(
+        "graphify.cache.check_semantic_cache",
+        lambda semantic_inputs, root: (cached_nodes, cached_edges, [], []),
+    )
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        [
+            "graphify",
+            "extract",
+            str(corpus),
+            "--backend",
+            "claude",
+            "--out",
+            str(out_dir),
+            "--strict",
+            "--no-cluster",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        mainmod.main()
+
+    assert exc_info.value.code == 1
+    audit_path = out_dir / "graphify-out" / "extraction-audit.json"
+    assert audit_path.exists()
+    import json
+
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert any(
+        failure["code"] == "missing_source_file"
+        and failure["details"].get("kind") == "edge"
+        for failure in audit["strict_failures"]
+    )
+    assert "strict/seed mode failed" in capsys.readouterr().err
+    assert not (out_dir / "graphify-out" / "graph.json").exists()
 
 
 def test_extract_codeonly_succeeds_without_api_key(monkeypatch, tmp_path):

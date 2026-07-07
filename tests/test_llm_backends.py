@@ -552,18 +552,18 @@ def test_call_openai_compat_relabels_none_content_as_length(monkeypatch):
     assert result["finish_reason"] == "length"
 
 
-def test_call_openai_compat_relabels_unparseable_json_as_length(monkeypatch):
-    # A half-generated response: `{"nodes": [{"id":` parses to {} (empty
-    # fragment) via _parse_llm_json's JSONDecodeError fallback. That is also
-    # hollow and must trigger bisection.
+def test_call_openai_compat_raises_invalid_json_for_unparseable_json(monkeypatch):
+    # A half-generated response is not hollow; it is an explicit parse failure
+    # so strict/audit callers can record `invalid_json` instead of treating the
+    # chunk as a valid empty fragment.
     fake_resp = _fake_openai_response('{"nodes": [{"id":', finish_reason="stop", completion_tokens=20)
     _install_fake_openai(monkeypatch, fake_resp)
 
-    result = llm._call_openai_compat(
-        "http://localhost:11434/v1", "ollama", "qwen2.5-coder:7b",
-        "u", temperature=0, max_completion_tokens=8192, backend="ollama",
-    )
-    assert result["finish_reason"] == "length"
+    with pytest.raises(ValueError, match="^invalid_json:"):
+        llm._call_openai_compat(
+            "http://localhost:11434/v1", "ollama", "qwen2.5-coder:7b",
+            "u", temperature=0, max_completion_tokens=8192, backend="ollama",
+        )
 
 
 def test_call_openai_compat_preserves_real_finish_reason(monkeypatch):
@@ -834,6 +834,53 @@ def test_adaptive_retry_bisects_on_hollow_ollama_response(tmp_path):
         "full chunk came back hollow"
     )
     assert calls["n"] == 3  # 1 hollow + 2 successful halves
+
+
+def test_adaptive_retry_preserves_hollow_warning_after_successful_split(tmp_path):
+    files = [tmp_path / f"f{i}.md" for i in range(4)]
+    for f in files:
+        f.write_text("hello")
+
+    calls = {"n": 0}
+    trigger_warning = {
+        "code": "hollow_response",
+        "message": "backend returned no usable nodes or edges",
+        "details": {"chunk_size": 4},
+    }
+
+    def fake_extract(chunk, *_, **__):
+        calls["n"] += 1
+        if len(chunk) == 4:
+            return {
+                "nodes": [],
+                "edges": [],
+                "hyperedges": [],
+                "warnings": [trigger_warning],
+                "input_tokens": 100,
+                "output_tokens": 0,
+                "model": "m",
+                "finish_reason": "length",
+            }
+        return _ok(nodes=[{"id": f.stem} for f in chunk])
+
+    callback_warnings = []
+    with patch("graphify.llm.extract_files_direct", side_effect=fake_extract):
+        result = llm._extract_with_adaptive_retry(
+            files,
+            backend="ollama",
+            api_key="ollama",
+            model="qwen2.5-coder:7b",
+            root=tmp_path,
+            max_depth=3,
+            strict=True,
+            on_warning=callback_warnings.append,
+        )
+
+    assert len(result["nodes"]) == 4
+    assert result["warnings"][0]["code"] == "hollow_response"
+    assert result["warnings"][0]["details"]["chunk_size"] == 4
+    assert callback_warnings == []
+    assert calls["n"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -1238,3 +1285,94 @@ def test_call_llm_openai_compat_client_built_with_timeout_and_retries(monkeypatc
     llm._call_llm("hi", backend="kimi")
     assert ctor_kwargs.get("timeout") == 1.0, ctor_kwargs
     assert ctor_kwargs.get("max_retries", 0) >= 5, ctor_kwargs
+
+
+def test_backend_route_info_shows_native_gemini_structured_output(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
+    monkeypatch.setitem(
+        llm.BACKENDS["gemini"],
+        "base_url",
+        "https://generativelanguage.googleapis.com/v1beta/openai/",
+    )
+
+    info = llm.backend_route_info("gemini")
+
+    assert info["name"] == "gemini"
+    assert info["model"] == "gemini-3-flash-preview"
+    assert info["route"] == "google-genai"
+    assert info["native_structured_output"] is True
+    assert info["fell_back_to_openai_compat"] is False
+
+
+def test_backend_route_info_shows_custom_gemini_openai_compat(monkeypatch):
+    monkeypatch.setitem(llm.BACKENDS["gemini"], "base_url", "https://proxy.example/v1")
+
+    info = llm.backend_route_info("gemini", model="gemini-proxy")
+
+    assert info["base_url"] == "https://proxy.example/v1"
+    assert info["route"] == "openai-compatible"
+    assert info["native_structured_output"] is False
+    assert info["fell_back_to_openai_compat"] is True
+
+
+def test_strict_retry_raises_instead_of_keeping_partial_single_file(tmp_path):
+    f = tmp_path / "doc.md"
+    f.write_text("# Doc\n\nBody\n")
+
+    def fake_extract(*_, **__):
+        return {
+            "nodes": [{"id": "doc", "source_file": "doc.md"}],
+            "edges": [],
+            "hyperedges": [],
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "model": "m",
+            "finish_reason": "length",
+        }
+
+    warnings = []
+    with patch("graphify.llm.extract_files_direct", side_effect=fake_extract):
+        with pytest.raises(llm.StrictExtractionError):
+            llm._extract_with_adaptive_retry(
+                [f],
+                backend="kimi",
+                api_key="k",
+                model="m",
+                root=tmp_path,
+                max_depth=0,
+                strict=True,
+                on_warning=warnings.append,
+            )
+
+    assert warnings
+    assert warnings[0]["code"] == "partial_truncation"
+
+
+def test_strict_retry_raises_when_multifile_context_overflows_at_max_depth(tmp_path):
+    first = tmp_path / "one.md"
+    second = tmp_path / "two.md"
+    first.write_text("# One\n")
+    second.write_text("# Two\n")
+
+    def fake_extract(*_, **__):
+        raise RuntimeError("context_length_exceeded")
+
+    warnings = []
+    with patch("graphify.llm.extract_files_direct", side_effect=fake_extract):
+        with pytest.raises(llm.StrictExtractionError):
+            llm._extract_with_adaptive_retry(
+                [first, second],
+                backend="kimi",
+                api_key="k",
+                model="m",
+                root=tmp_path,
+                max_depth=0,
+                strict=True,
+                on_warning=warnings.append,
+            )
+
+    assert warnings
+    assert warnings[0]["code"] == "chunk_failed"
+    assert warnings[0]["details"]["chunk_size"] == 2
+    assert warnings[0]["details"]["depth"] == 0

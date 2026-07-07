@@ -2228,6 +2228,117 @@ def _clone_repo(
     return dest
 
 
+def _cmd_seed_hydrate_smoke() -> None:
+    if len(sys.argv) < 4 or sys.argv[2] != "hydrate-smoke":
+        print(
+            "Usage: graphify seed hydrate-smoke <path> [--json] [--keep-temp]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    source = Path(sys.argv[3]).resolve()
+    json_out = False
+    keep_temp = False
+    for arg in sys.argv[4:]:
+        if arg == "--json":
+            json_out = True
+        elif arg == "--keep-temp":
+            keep_temp = True
+        else:
+            print(f"error: unknown seed hydrate-smoke option {arg}", file=sys.stderr)
+            sys.exit(1)
+
+    if not source.exists():
+        print(f"error: path not found: {source}", file=sys.stderr)
+        sys.exit(1)
+    if not source.is_dir():
+        print(f"error: path must be a directory: {source}", file=sys.stderr)
+        sys.exit(1)
+
+    import subprocess
+    import tempfile
+
+    ignored = shutil.ignore_patterns(
+        ".git",
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+    )
+    temp_parent = Path(tempfile.mkdtemp(prefix="graphify-hydrate-"))
+    temp_project = temp_parent / source.name
+    try:
+        shutil.copytree(source, temp_project, ignore=ignored)
+        marker = temp_project / _GRAPHIFY_OUT / ".graphify_root"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(temp_project), encoding="utf-8")
+
+        child_env = os.environ.copy()
+        repo_root = str(Path(__file__).resolve().parent.parent)
+        existing_pythonpath = child_env.get("PYTHONPATH")
+        child_env["PYTHONPATH"] = (
+            repo_root
+            if not existing_pythonpath
+            else repo_root + os.pathsep + existing_pythonpath
+        )
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "graphify", "extract", str(temp_project), "--seed"],
+            cwd=temp_project,
+            env=child_env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+        audit_path = temp_project / _GRAPHIFY_OUT / "extraction-audit.json"
+        audit: dict = {}
+        if audit_path.exists():
+            try:
+                audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                audit = {}
+
+        cache = audit.get("cache") or {}
+        extraction = audit.get("extraction") or {}
+        misses = int(cache.get("semantic_cache_misses", -1))
+        output_tokens = int(extraction.get("output_tokens", -1))
+        failures = audit.get("strict_failures") or []
+        ok = (
+            proc.returncode == 0
+            and misses == 0
+            and output_tokens == 0
+            and not failures
+        )
+        payload = {
+            "ok": ok,
+            "temp_dir": str(temp_project),
+            "returncode": proc.returncode,
+            "semantic_cache_misses": misses,
+            "output_tokens": output_tokens,
+            "strict_failures": failures,
+        }
+        if json_out:
+            print(json.dumps(payload, indent=2))
+        else:
+            status = "OK" if ok else "FAILED"
+            print(f"hydrate smoke: {status}")
+            print(f"temp dir: {temp_project}")
+            print(f"return code: {proc.returncode}")
+            print(f"semantic cache misses: {misses}")
+            print(f"output tokens: {output_tokens}")
+            if failures:
+                print(f"strict failures: {len(failures)}")
+
+        if not ok:
+            sys.exit(1)
+    finally:
+        if not keep_temp:
+            shutil.rmtree(temp_parent, ignore_errors=True)
+
+
 def main() -> None:
     for _stream in (sys.stdout, sys.stderr):
         if _stream is not None and hasattr(_stream, "reconfigure"):
@@ -2329,6 +2440,8 @@ def main() -> None:
         print("    --half-life-days N      signal weight halves every N days (default 30)")
         print("    --min-corroboration N   distinct useful results to prefer a node (default 2)")
         print("  check-update <path>     check needs_update flag and notify if semantic re-extraction is pending (cron-safe)")
+        print("  cache status [path]     report semantic cache completeness")
+        print("  seed hydrate-smoke      validate a reusable seed in a temp copy")
         print("  tree                    emit a D3 v7 collapsible-tree HTML for graph.json")
         print("    --graph PATH            path to graph.json (default graphify-out/graph.json)")
         print("    --output HTML           output path (default graphify-out/GRAPH_TREE.html)")
@@ -3629,10 +3742,33 @@ def main() -> None:
                     for cid, members in communities.items()
                     if cid not in existing_labels or existing_labels.get(cid) == f"Community {cid}"
                 }
-            generated_labels, _ = generate_community_labels(
+            generated_labels, label_source = generate_community_labels(
                 G, label_communities_input, backend=label_backend, model=label_model, gods=gods,
                 max_concurrency=label_max_concurrency, batch_size=label_batch_size,
             )
+            if label_source == "placeholder":
+                from graphify.audit import (
+                    add_warning as _audit_warning,
+                    new_extraction_audit as _new_audit,
+                    write_audit as _write_audit,
+                )
+
+                audit_path = out / "extraction-audit.json"
+                if audit_path.exists():
+                    try:
+                        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+                    except json.JSONDecodeError:
+                        audit = _new_audit(watch_path, out, mode="explore", strict=False)
+                else:
+                    audit = _new_audit(watch_path, out, mode="explore", strict=False)
+                _audit_warning(
+                    audit,
+                    "community_label_fallback",
+                    "community labels fell back to placeholders",
+                    severity="info",
+                    details={"label_source": label_source},
+                )
+                _write_audit(audit, audit_path)
             # Only let the LLM OVERRIDE where it produced a real name — its no-backend
             # fallback returns "Community {cid}" placeholders, which must not clobber
             # the deterministic hub labels.
@@ -4333,6 +4469,9 @@ def main() -> None:
         else:
             print("Usage: graphify global [add|remove|list|path]", file=sys.stderr); sys.exit(1)
 
+    elif cmd == "seed":
+        _cmd_seed_hydrate_smoke()
+
     elif cmd == "extract":
         # Headless full-pipeline extraction for CI / scripts (#698).
         # Runs detect -> AST extraction on code -> semantic LLM extraction on
@@ -4345,7 +4484,7 @@ def main() -> None:
                 "Usage: graphify extract <path> [--backend gemini|kimi|claude|openai|deepseek|ollama] "
                 "[--model M] [--mode deep] [--out DIR] [--google-workspace] [--no-cluster] "
                 "[--max-workers N] [--token-budget N] [--max-concurrency N] "
-                "[--api-timeout S] [--postgres DSN] [--cargo] [--timing]",
+                "[--api-timeout S] [--postgres DSN] [--cargo] [--timing] [--strict|--seed]",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -4381,6 +4520,8 @@ def main() -> None:
         cli_exclude_hubs: float | None = None
         cli_excludes: list[str] = []
         cli_timing: bool = False
+        strict_mode = False
+        seed_mode = False
 
         def _parse_int(name: str, raw: str) -> int:
             try:
@@ -4471,6 +4612,12 @@ def main() -> None:
                 i += 1
             elif a == "--timing":
                 cli_timing = True; i += 1
+            elif a == "--strict":
+                strict_mode = True; i += 1
+            elif a == "--seed":
+                seed_mode = True
+                strict_mode = True
+                i += 1
             else:
                 i += 1
 
@@ -4505,6 +4652,28 @@ def main() -> None:
         graphify_out.mkdir(parents=True, exist_ok=True)
 
         stages = _StageTimer(cli_timing)
+        from graphify.audit import (
+            add_warning as _audit_warning,
+            backfill_single_file_source as _backfill_single_file_source,
+            namespace_semantic_node_ids as _namespace_semantic_node_ids,
+            new_extraction_audit as _new_audit,
+            record_cache_status as _audit_cache,
+            record_collisions as _audit_collisions,
+            record_backend as _audit_backend,
+            record_detection as _audit_detection,
+            record_source_attribution as _audit_source_attribution,
+            strict_failures as _audit_strict_failures,
+            write_audit as _write_audit,
+        )
+
+        audit_mode = "seed" if seed_mode else ("strict" if strict_mode else "explore")
+        audit_path = graphify_out / "extraction-audit.json"
+        audit = _new_audit(target, out_root, mode=audit_mode, strict=strict_mode)
+
+        def _write_audit_and_exit(message: str, code: int = 1) -> None:
+            _write_audit(audit, audit_path)
+            print(message, file=sys.stderr)
+            sys.exit(code)
 
         from graphify.detect import (
             detect as _detect,
@@ -4563,6 +4732,13 @@ def main() -> None:
                 f"{len(doc_files)} docs, {len(paper_files)} papers, "
                 f"{len(image_files)} images"
             )
+        _audit_detection(
+            audit,
+            code_files=code_files,
+            doc_files=doc_files,
+            paper_files=paper_files,
+            image_files=image_files,
+        )
         stages.mark("detect")
 
         # Resolve the LLM backend only now that we know whether the corpus
@@ -4570,6 +4746,7 @@ def main() -> None:
         # an API key; the key is enforced below only when there's LLM work.
         from graphify.llm import (
             BACKENDS as _BACKENDS,
+            backend_route_info as _backend_route_info,
             detect_backend as _detect_backend,
             estimate_cost as _estimate_cost,
             extract_corpus_parallel as _extract_corpus_parallel,
@@ -4580,12 +4757,14 @@ def main() -> None:
         if backend is None and needs_llm:
             backend = _detect_backend()
         if backend is not None and backend not in _BACKENDS:
-            print(
+            _write_audit_and_exit(
                 f"error: unknown backend '{backend}'. "
-                f"Available: {', '.join(sorted(_BACKENDS))}",
-                file=sys.stderr,
+                f"Available: {', '.join(sorted(_BACKENDS))}"
             )
-            sys.exit(1)
+        audit["backend"]["name"] = backend
+        audit["backend"]["model"] = model
+        if backend is not None:
+            _audit_backend(audit, _backend_route_info(backend, model=model))
         if needs_llm:
             if backend is None:
                 reasons = []
@@ -4595,23 +4774,20 @@ def main() -> None:
                     )
                 if dedup_llm:
                     reasons.append("--dedup-llm was passed")
-                print(
+                _write_audit_and_exit(
                     "error: no LLM API key found (" + "; ".join(reasons) + "). "
                     "Set GEMINI_API_KEY or GOOGLE_API_KEY (gemini), MOONSHOT_API_KEY "
                     "(kimi), ANTHROPIC_API_KEY (claude), OPENAI_API_KEY (openai), "
                     "DEEPSEEK_API_KEY (deepseek), or pass --backend. A code-only "
-                    "corpus needs no key.",
-                    file=sys.stderr,
+                    "corpus needs no key."
                 )
-                sys.exit(1)
             if backend == "ollama":
                 from graphify.llm import _validate_ollama_base_url
                 _oll_url = os.environ.get("OLLAMA_BASE_URL", _BACKENDS["ollama"].get("base_url", ""))
                 try:
                     _validate_ollama_base_url(_oll_url, warn=False)
                 except ValueError as exc:
-                    print(f"error: {exc}", file=sys.stderr)
-                    sys.exit(2)
+                    _write_audit_and_exit(f"error: {exc}", code=2)
             if not _get_backend_api_key(backend):
                 allow_no_key = False
                 if backend == "ollama":
@@ -4639,18 +4815,14 @@ def main() -> None:
                     import shutil as _shutil
                     allow_no_key = _shutil.which("claude") is not None
                     if not allow_no_key:
-                        print(
+                        _write_audit_and_exit(
                             "error: backend 'claude-cli' requires the `claude` CLI on $PATH "
-                            "(install Claude Code and run `claude` once to authenticate).",
-                            file=sys.stderr,
+                            "(install Claude Code and run `claude` once to authenticate)."
                         )
-                        sys.exit(1)
                 if not allow_no_key:
-                    print(
-                        f"error: backend '{backend}' requires {_format_backend_env_keys(backend)} to be set.",
-                        file=sys.stderr,
+                    _write_audit_and_exit(
+                        f"error: backend '{backend}' requires {_format_backend_env_keys(backend)} to be set."
                     )
-                    sys.exit(1)
 
         # AST extraction on code files. Empty code list (docs-only corpus) is
         # the issue #698 case — skip cleanly instead of crashing inside extract().
@@ -4676,6 +4848,7 @@ def main() -> None:
             check_semantic_cache as _check_semantic_cache,
             prune_semantic_cache as _prune_semantic_cache,
             save_semantic_cache as _save_semantic_cache,
+            semantic_cache_collisions as _semantic_cache_collisions,
         )
         sem_result: dict = {
             "nodes": [], "edges": [], "hyperedges": [],
@@ -4683,18 +4856,35 @@ def main() -> None:
         }
         sem_cache_hits = 0
         sem_cache_misses = 0
+        semantic_namespace_collisions: list[dict] = []
         if semantic_files:
             sem_paths_str = [str(p) for p in semantic_files]
             cached_nodes, cached_edges, cached_hyperedges, uncached_paths = (
                 _check_semantic_cache(sem_paths_str, root=out_root)
             )
+            hit_paths = [str(p) for p in semantic_files if str(p) not in set(uncached_paths)]
+            _audit_cache(audit, sem_paths_str, hit_paths, list(uncached_paths))
             sem_cache_hits = len(semantic_files) - len(uncached_paths)
             sem_cache_misses = len(uncached_paths)
             sem_result["nodes"].extend(cached_nodes)
             sem_result["edges"].extend(cached_edges)
             sem_result["hyperedges"].extend(cached_hyperedges)
+            semantic_namespace_collisions.extend(
+                _semantic_cache_collisions(hit_paths, root=out_root)
+            )
+            _cached_remap, _cached_collisions = _namespace_semantic_node_ids(sem_result, target)
+            semantic_namespace_collisions.extend(_cached_collisions)
             if sem_cache_hits:
                 print(f"[graphify extract] semantic cache: {sem_cache_hits} hit / {sem_cache_misses} miss")
+            if strict_mode and uncached_paths:
+                failures = _audit_strict_failures(audit)
+                _write_audit(audit, audit_path)
+                print(
+                    f"[graphify extract] strict/seed mode failed: {len(failures)} fatal audit issue(s). "
+                    f"See {audit_path}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
             if uncached_paths:
                 print(f"[graphify extract] semantic extraction on {len(uncached_paths)} files via {backend}...")
@@ -4724,38 +4914,76 @@ def main() -> None:
                     )
                 corpus_kwargs["on_chunk_done"] = _progress
 
+                def _semantic_warning(event: dict) -> None:
+                    details = dict(event.get("details") or {})
+                    source_file = event.get("source_file") or details.pop("source_file", None)
+                    _audit_warning(
+                        audit,
+                        event.get("code", "chunk_failed"),
+                        event.get("message", "semantic extraction warning"),
+                        source_file=source_file,
+                        details=details,
+                    )
+                corpus_kwargs["strict"] = strict_mode
+                corpus_kwargs["on_warning"] = _semantic_warning
+
                 try:
                     fresh = _extract_corpus_parallel(
                         [Path(p) for p in uncached_paths],
                         **corpus_kwargs,
                     )
                 except ImportError as exc:
-                    print(f"error: {exc}", file=sys.stderr)
-                    sys.exit(1)
+                    _audit_warning(
+                        audit,
+                        "chunk_failed",
+                        f"semantic extraction failed: {exc}",
+                        details={"backend": backend},
+                    )
+                    _write_audit_and_exit(f"error: {exc}")
                 except Exception as exc:
+                    _audit_warning(
+                        audit,
+                        "chunk_failed",
+                        f"semantic extraction failed: {exc}",
+                        details={"backend": backend},
+                    )
                     print(
                         f"[graphify extract] semantic extraction failed: {exc}",
                         file=sys.stderr,
                     )
                     fresh = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0}
 
+                for warning in fresh.get("warnings", []):
+                    if isinstance(warning, dict):
+                        _semantic_warning(warning)
+
+                if len(uncached_paths) == 1:
+                    _backfill_single_file_source(fresh, str(uncached_paths[0]))
+                _fresh_remap, _fresh_collisions = _namespace_semantic_node_ids(fresh, target)
+                semantic_namespace_collisions.extend(_fresh_collisions)
+
                 # on_chunk_done only fires after a chunk succeeds. If fresh
                 # semantic extraction was requested and no chunks completed,
                 # fail instead of writing an AST-only graph with exit 0.
                 if uncached_paths and _chunk_stats["succeeded"] == 0:
-                    print(
+                    _audit_warning(
+                        audit,
+                        "chunk_failed",
+                        f"all semantic chunks failed for backend {backend!r}",
+                        details={"uncached_files": len(uncached_paths), "backend": backend},
+                    )
+                    _write_audit_and_exit(
                         f"[graphify extract] error: all semantic chunks failed "
                         f"for backend '{backend}' ({len(uncached_paths)} uncached files) - "
                         f"see per-chunk errors above. If you see 'requires the X package', "
-                        f"run `pip install X` and retry.",
-                        file=sys.stderr,
+                        f"run `pip install X` and retry."
                     )
-                    sys.exit(1)
                 try:
                     _save_semantic_cache(
                         fresh.get("nodes", []),
                         fresh.get("edges", []),
                         fresh.get("hyperedges", []),
+                        collisions=_fresh_collisions,
                         root=out_root,
                     )
                 except Exception as exc:
@@ -4765,6 +4993,9 @@ def main() -> None:
                 sem_result["hyperedges"].extend(fresh.get("hyperedges", []))
                 sem_result["input_tokens"] += fresh.get("input_tokens", 0)
                 sem_result["output_tokens"] += fresh.get("output_tokens", 0)
+
+            if len(semantic_files) == 1:
+                _backfill_single_file_source(sem_result, str(semantic_files[0]))
 
         # Prune orphaned semantic cache entries. The semantic cache is
         # content-hash-keyed and unversioned, so it is never swept by the AST
@@ -4800,8 +5031,13 @@ def main() -> None:
             try:
                 pg_result = introspect_postgres(cli_postgres_dsn)
             except (ConnectionError, ImportError) as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                sys.exit(1)
+                _audit_warning(
+                    audit,
+                    "chunk_failed",
+                    f"PostgreSQL introspection failed: {exc}",
+                    details={"introspection": "postgres", "dsn": cli_postgres_dsn},
+                )
+                _write_audit_and_exit(f"error: {exc}")
             print(f"[graphify extract] PostgreSQL: {len(pg_result['nodes'])} nodes, "
                   f"{len(pg_result['edges'])} edges")
 
@@ -4812,8 +5048,13 @@ def main() -> None:
             try:
                 cargo_result = introspect_cargo(target)
             except (ConnectionError, ImportError, OSError) as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                sys.exit(1)
+                _audit_warning(
+                    audit,
+                    "chunk_failed",
+                    f"Cargo introspection failed: {exc}",
+                    details={"introspection": "cargo", "target": str(target)},
+                )
+                _write_audit_and_exit(f"error: {exc}")
             print(f"[graphify extract] Cargo: {len(cargo_result['nodes'])} nodes, "
                   f"{len(cargo_result['edges'])} edges")
 
@@ -4828,6 +5069,20 @@ def main() -> None:
             "input_tokens": ast_result.get("input_tokens", 0) + sem_result.get("input_tokens", 0),
             "output_tokens": ast_result.get("output_tokens", 0) + sem_result.get("output_tokens", 0),
         }
+        audit["extraction"]["input_tokens"] = merged.get("input_tokens", 0)
+        audit["extraction"]["output_tokens"] = merged.get("output_tokens", 0)
+        _audit_collisions(audit, list(merged.get("nodes", [])), semantic_namespace_collisions)
+        _audit_source_attribution(audit, merged)
+        if strict_mode:
+            failures = _audit_strict_failures(audit)
+            if failures:
+                _write_audit(audit, audit_path)
+                print(
+                    f"[graphify extract] strict/seed mode failed: {len(failures)} fatal audit issue(s). "
+                    f"See {audit_path}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
         graph_json_path = graphify_out / "graph.json"
         analysis_path = graphify_out / ".graphify_analysis.json"
@@ -4875,19 +5130,12 @@ def main() -> None:
                     _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both", root=target)
                 except Exception as exc:
                     print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
+                _write_audit(audit, audit_path)
                 stages.total()
                 sys.exit(0)
 
             merged["nodes"] = _dedupe_nodes(merged["nodes"])
             merged["edges"] = _dedupe_edges(merged["edges"])
-            # Backfill source_file from endpoint nodes — this raw path bypasses
-            # build_from_json's backfill, and semantic edges sometimes omit it (#1279).
-            _node_sf = {n.get("id"): n.get("source_file") for n in merged["nodes"]}
-            for _e in merged["edges"]:
-                if not _e.get("source_file"):
-                    _e["source_file"] = (
-                        _node_sf.get(_e.get("source")) or _node_sf.get(_e.get("target")) or ""
-                    )
             _backup(graphify_out)
             graph_json_path.write_text(
                 json.dumps(merged, indent=2), encoding="utf-8"
@@ -4924,6 +5172,7 @@ def main() -> None:
                               f"(+{result['nodes_added']} nodes, -{result['nodes_removed']} pruned).")
                 except Exception as exc:
                     print(f"[graphify global] warning: failed to merge into global graph: {exc}", file=sys.stderr)
+            _write_audit(audit, audit_path)
             stages.total()
             sys.exit(0)
 
@@ -4950,13 +5199,11 @@ def main() -> None:
             G = _build([merged], dedup=True, dedup_llm_backend=dedup_backend, root=target)
         stages.mark("build")
         if G.number_of_nodes() == 0:
-            print(
+            _write_audit_and_exit(
                 "[graphify extract] graph is empty — extraction produced no nodes. "
                 "Possible causes: all files skipped, binary-only corpus, or LLM "
-                "returned no edges.",
-                file=sys.stderr,
+                "returned no edges."
             )
-            sys.exit(1)
 
         communities = _cluster(G, resolution=cli_resolution, exclude_hubs_percentile=cli_exclude_hubs)
         stages.mark("cluster")
@@ -5006,6 +5253,7 @@ def main() -> None:
             _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both", root=target)
         except Exception as exc:
             print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
+        _write_audit(audit, audit_path)
 
         cost = _estimate_cost(backend, merged["input_tokens"], merged["output_tokens"])
         print(
@@ -5039,6 +5287,60 @@ def main() -> None:
             "to generate GRAPH_REPORT.md and name communities"
         )
         stages.total()
+
+    elif cmd == "cache":
+        if len(sys.argv) < 3 or sys.argv[2] != "status":
+            print("Usage: graphify cache status [path] [--json]", file=sys.stderr)
+            sys.exit(1)
+        root_arg: Path | None = None
+        json_out = False
+        i = 3
+        while i < len(sys.argv):
+            arg = sys.argv[i]
+            if arg == "--json":
+                json_out = True
+                i += 1
+            elif root_arg is None:
+                root_arg = Path(arg)
+                i += 1
+            else:
+                print(f"error: unknown cache status option {arg}", file=sys.stderr)
+                sys.exit(1)
+        root = (root_arg or Path(".")).resolve()
+        if not root.exists():
+            print(f"error: path not found: {root}", file=sys.stderr)
+            sys.exit(1)
+
+        from graphify.cache import check_semantic_cache as _check_semantic_cache
+        from graphify.detect import detect as _detect
+
+        detection = _detect(root)
+        files_by_type = detection.get("files", {})
+        semantic_inputs = [
+            f
+            for kind in ("document", "paper", "image")
+            for f in files_by_type.get(kind, [])
+        ]
+        _, _, _, misses = _check_semantic_cache(semantic_inputs, root)
+        miss_set = set(misses)
+        hits = [f for f in semantic_inputs if f not in miss_set]
+        payload = {
+            "semantic_inputs": len(semantic_inputs),
+            "semantic_cache_hits": len(hits),
+            "semantic_cache_misses": len(misses),
+            "hit_paths": hits,
+            "miss_paths": misses,
+        }
+        if json_out:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(
+                f"Semantic cache: {payload['semantic_cache_hits']} hit / "
+                f"{payload['semantic_cache_misses']} miss "
+                f"({payload['semantic_inputs']} inputs)"
+            )
+            for miss in misses:
+                print(f"  MISS {miss}")
 
     elif cmd == "cache-check":
         # graphify cache-check <files_from> [--root <dir>]

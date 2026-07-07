@@ -14,6 +14,10 @@ Turn any folder of files into a navigable knowledge graph with community detecti
 /graphify <url1> <url2> ...                           # clone multiple repos, build each, merge into one cross-repo graph
 /graphify <path> --mode deep                          # thorough extraction, richer INFERRED edges
 /graphify <path> --update                             # incremental - re-extract only new/changed files
+/graphify <path> --strict                             # fail on seed-corrupting extraction warnings
+/graphify <path> --seed                               # canonical reusable seed mode (strict + cache-complete)
+/graphify cache status <path> --json                  # report semantic cache hits/misses and exact miss paths
+/graphify seed hydrate-smoke <path> --json            # verify a seed hydrates without semantic re-extraction
 /graphify <path> --directed                            # build directed graph (preserves edge direction: source→target)
 /graphify <path> --whisper-model medium                # use a larger Whisper model for better transcription accuracy
 /graphify <path> --cluster-only                       # rerun clustering on existing graph
@@ -42,6 +46,8 @@ Turn any folder of files into a navigable knowledge graph with community detecti
 ## What graphify is for
 
 Drop any folder of code, docs, papers, images, or video into graphify and get a queryable knowledge graph. Persistent across sessions, honest audit trail (EXTRACTED/INFERRED/AMBIGUOUS), community detection surfaces cross-document connections you wouldn't think to ask about.
+
+`graphify extract` is best-effort by default. For a canonical reusable seed, run `graphify cache status <path> --json` first, then `graphify extract <path> --seed`. Seed mode writes `graphify-out/extraction-audit.json` and exits non-zero on seed-corrupting warnings such as cache misses, missing `source_file`, invalid JSON, hollow responses, unrecovered truncation, and node ID collisions. Community label fallback is recorded as low-severity audit info and does not block extraction. After building a seed, `graphify seed hydrate-smoke <path> --json` copies it into a temp project, rewrites local pointers, runs update, and confirms no semantic re-extraction is needed.
 
 ## What You Must Do When Invoked
 
@@ -172,6 +178,14 @@ Before dispatching subagents, print a timing estimate:
 **Step B0 - Check extraction cache first**
 
 Before dispatching any subagents, check which files already have cached extraction results:
+
+For canonical seed work, prefer the direct CLI check before extraction:
+
+```bash
+graphify cache status INPUT_PATH --json
+```
+
+The JSON includes `semantic_inputs`, `semantic_cache_hits`, `semantic_cache_misses`, and exact `miss_paths`. A nonzero miss count means `graphify extract INPUT_PATH --seed` will fail instead of silently producing a seed with newly generated semantic content.
 
 ```bash
 $(cat graphify-out/.graphify_python) -c "
