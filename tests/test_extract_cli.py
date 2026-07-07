@@ -78,6 +78,33 @@ def test_extract_exits_nonzero_when_all_semantic_chunks_fail(
     )
 
 
+def test_extract_seed_fails_on_semantic_cache_miss(monkeypatch, tmp_path, capsys):
+    corpus = _make_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-key")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus), "--backend", "claude", "--out", str(out_dir), "--seed"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        mainmod.main()
+
+    assert exc_info.value.code == 1
+    audit_path = out_dir / "graphify-out" / "extraction-audit.json"
+    assert audit_path.exists()
+    import json
+
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit["mode"] == "seed"
+    assert audit["strict"] is True
+    assert audit["cache"]["semantic_cache_misses"] == 1
+    assert any(f["code"] == "semantic_cache_miss" for f in audit["strict_failures"])
+    assert "strict/seed mode failed" in capsys.readouterr().err
+
+
 def test_extract_succeeds_when_at_least_one_chunk_completes(
     monkeypatch, tmp_path
 ):
@@ -143,6 +170,29 @@ def _clear_backend_keys(monkeypatch):
         "OLLAMA_BASE_URL",
     ):
         monkeypatch.delenv(key, raising=False)
+
+
+def test_extract_writes_audit_on_code_only_success(monkeypatch, tmp_path):
+    corpus = _code_only_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    _clear_backend_keys(monkeypatch)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus), "--out", str(out_dir), "--no-cluster"],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        mainmod.main()
+
+    assert exc_info.value.code == 0
+    import json
+
+    audit = json.loads((out_dir / "graphify-out" / "extraction-audit.json").read_text())
+    assert audit["mode"] == "explore"
+    assert audit["detected"]["code_files"] == 1
+    assert audit["cache"]["semantic_inputs"] == 0
 
 
 def test_extract_codeonly_succeeds_without_api_key(monkeypatch, tmp_path):
