@@ -907,35 +907,36 @@ def _parse_llm_json(raw: str) -> dict:
     # the text. Handles the case where Claude wraps the JSON in prose without
     # any markdown fence ("The extracted graph is { ... }. Hope this helps!").
     start = stripped.find("{")
-    if start != -1:
-        depth = 0
-        in_string = False
-        escape = False
-        for i in range(start, len(stripped)):
-            ch = stripped[i]
-            if escape:
-                escape = False
-                continue
-            if ch == "\\":
-                escape = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        parsed = json.loads(stripped[start : i + 1])
-                        if isinstance(parsed, dict):
-                            return parsed
-                        break
-                    except json.JSONDecodeError:
-                        break
+    if start == -1:
+        return {"nodes": [], "edges": [], "hyperedges": []}
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(stripped)):
+        ch = stripped[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(stripped[start : i + 1])
+                    if isinstance(parsed, dict):
+                        return parsed
+                    break
+                except json.JSONDecodeError:
+                    break
     raise ValueError(f"invalid_json: could not parse LLM JSON response; first 500 chars: {raw[:500]!r}")
 
 
