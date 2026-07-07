@@ -3742,10 +3742,33 @@ def main() -> None:
                     for cid, members in communities.items()
                     if cid not in existing_labels or existing_labels.get(cid) == f"Community {cid}"
                 }
-            generated_labels, _ = generate_community_labels(
+            generated_labels, label_source = generate_community_labels(
                 G, label_communities_input, backend=label_backend, model=label_model, gods=gods,
                 max_concurrency=label_max_concurrency, batch_size=label_batch_size,
             )
+            if label_source == "placeholder":
+                from graphify.audit import (
+                    add_warning as _audit_warning,
+                    new_extraction_audit as _new_audit,
+                    write_audit as _write_audit,
+                )
+
+                audit_path = out / "extraction-audit.json"
+                if audit_path.exists():
+                    try:
+                        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+                    except json.JSONDecodeError:
+                        audit = _new_audit(watch_path, out, mode="explore", strict=False)
+                else:
+                    audit = _new_audit(watch_path, out, mode="explore", strict=False)
+                _audit_warning(
+                    audit,
+                    "community_label_fallback",
+                    "community labels fell back to placeholders",
+                    severity="info",
+                    details={"label_source": label_source},
+                )
+                _write_audit(audit, audit_path)
             # Only let the LLM OVERRIDE where it produced a real name — its no-backend
             # fallback returns "Community {cid}" placeholders, which must not clobber
             # the deterministic hub labels.
