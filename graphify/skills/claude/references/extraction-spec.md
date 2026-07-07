@@ -65,6 +65,8 @@ Generate the extraction JSON matching this schema exactly:
 
 source_file RULE (every node, edge, and hyperedge): set source_file to the path of the originating file EXACTLY as it appears in FILE_LIST — verbatim and absolute. Do NOT shorten to a basename, do NOT re-relativize, do NOT strip any directory prefix, and do NOT change separators (the engine canonicalizes separators and relativizes against the build root downstream). Copy the FILE_LIST entry character-for-character. This keeps the full build and incremental --update on the same base, so build_merge's replace-on-re-extract matches the existing node instead of accumulating a duplicate.
 
+Strict/seed audit rule: missing or malformed semantic JSON, hollow responses, unrecovered truncation, unparseable label batches, missing `source_file`, semantic cache misses, and pre-namespace node ID collisions are recorded in `graphify-out/extraction-audit.json`. In `--strict` or `--seed` mode those warnings become non-zero exits, so do not omit evidence or keep partial semantic output as if it were complete. Community label fallback is audit evidence too, but it is low severity and does not block extraction.
+
 Then write the JSON to disk using the Write tool at this exact absolute path (no relative paths — Write resolves relative paths against an undefined cwd and the file will be silently lost):
 CHUNK_PATH
 ```

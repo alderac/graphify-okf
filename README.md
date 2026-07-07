@@ -42,9 +42,27 @@ graphify-out/
 │   ├── index.md
 │   ├── concepts/
 │   └── communities/
+├── extraction-audit.json  machine-readable strict/seed build audit
 ├── GRAPH_REPORT.md  the highlights: key concepts, surprising connections, suggested questions
 └── graph.json       the full graph — query it anytime without re-reading your files
 ```
+
+### Canonical seed validation
+
+`graphify extract` is best-effort by default. Use seed mode when a graph is
+meant to be reused as a canonical seed:
+
+```bash
+graphify cache status . --json
+graphify extract . --seed
+graphify seed hydrate-smoke . --json
+```
+
+Seed mode writes `graphify-out/extraction-audit.json` and exits non-zero on
+cache misses, missing `source_file`, invalid JSON, hollow model responses,
+unrecovered truncation, semantic node ID collisions, or unparseable label
+batches. Community label fallback is recorded in the audit as low severity and
+does not block extraction.
 
 For a readable architecture page with Mermaid call-flow diagrams, run:
 

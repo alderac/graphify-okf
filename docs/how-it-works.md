@@ -80,6 +80,21 @@ Every extracted file is fingerprinted by content hash. Re-runs skip unchanged fi
 
 ---
 
+## Exploration Graphs vs Canonical Seeds
+
+The normal extraction path optimizes for exploration: it keeps partial results
+visible and records warnings. A canonical seed must be reproducible,
+cache-complete, and source-attributed. `--strict` and `--seed` turn
+seed-corrupting warnings into non-zero exits and write the machine-readable
+audit at `graphify-out/extraction-audit.json`.
+
+Use `graphify cache status . --json` before a seed build to confirm semantic
+inputs are cache-complete, and `graphify seed hydrate-smoke . --json` after a
+seed is produced to copy it into a temporary project, rewrite local pointers,
+run an update, and confirm semantic re-extraction is not needed.
+
+---
+
 ## The graph format
 
 The output `graph.json` uses NetworkX's node-link format. Each node has:
