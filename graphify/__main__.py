@@ -2329,6 +2329,7 @@ def main() -> None:
         print("    --half-life-days N      signal weight halves every N days (default 30)")
         print("    --min-corroboration N   distinct useful results to prefer a node (default 2)")
         print("  check-update <path>     check needs_update flag and notify if semantic re-extraction is pending (cron-safe)")
+        print("  cache status [path]   report semantic cache completeness")
         print("  tree                    emit a D3 v7 collapsible-tree HTML for graph.json")
         print("    --graph PATH            path to graph.json (default graphify-out/graph.json)")
         print("    --output HTML           output path (default graphify-out/GRAPH_TREE.html)")
@@ -5148,6 +5149,60 @@ def main() -> None:
             "to generate GRAPH_REPORT.md and name communities"
         )
         stages.total()
+
+    elif cmd == "cache":
+        if len(sys.argv) < 3 or sys.argv[2] != "status":
+            print("Usage: graphify cache status [path] [--json]", file=sys.stderr)
+            sys.exit(1)
+        root_arg: Path | None = None
+        json_out = False
+        i = 3
+        while i < len(sys.argv):
+            arg = sys.argv[i]
+            if arg == "--json":
+                json_out = True
+                i += 1
+            elif root_arg is None:
+                root_arg = Path(arg)
+                i += 1
+            else:
+                print(f"error: unknown cache status option {arg}", file=sys.stderr)
+                sys.exit(1)
+        root = (root_arg or Path(".")).resolve()
+        if not root.exists():
+            print(f"error: path not found: {root}", file=sys.stderr)
+            sys.exit(1)
+
+        from graphify.cache import check_semantic_cache as _check_semantic_cache
+        from graphify.detect import detect as _detect
+
+        detection = _detect(root)
+        files_by_type = detection.get("files", {})
+        semantic_inputs = [
+            f
+            for kind in ("document", "paper", "image")
+            for f in files_by_type.get(kind, [])
+        ]
+        _, _, _, misses = _check_semantic_cache(semantic_inputs, root)
+        miss_set = set(misses)
+        hits = [f for f in semantic_inputs if f not in miss_set]
+        payload = {
+            "semantic_inputs": len(semantic_inputs),
+            "semantic_cache_hits": len(hits),
+            "semantic_cache_misses": len(misses),
+            "hit_paths": hits,
+            "miss_paths": misses,
+        }
+        if json_out:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(
+                f"Semantic cache: {payload['semantic_cache_hits']} hit / "
+                f"{payload['semantic_cache_misses']} miss "
+                f"({payload['semantic_inputs']} inputs)"
+            )
+            for miss in misses:
+                print(f"  MISS {miss}")
 
     elif cmd == "cache-check":
         # graphify cache-check <files_from> [--root <dir>]
