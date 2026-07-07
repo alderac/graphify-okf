@@ -2273,9 +2273,19 @@ def _cmd_seed_hydrate_smoke() -> None:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(str(temp_project), encoding="utf-8")
 
+        child_env = os.environ.copy()
+        repo_root = str(Path(__file__).resolve().parent.parent)
+        existing_pythonpath = child_env.get("PYTHONPATH")
+        child_env["PYTHONPATH"] = (
+            repo_root
+            if not existing_pythonpath
+            else repo_root + os.pathsep + existing_pythonpath
+        )
+
         proc = subprocess.run(
             [sys.executable, "-m", "graphify", "extract", str(temp_project), "--seed"],
             cwd=temp_project,
+            env=child_env,
             capture_output=True,
             text=True,
             encoding="utf-8",

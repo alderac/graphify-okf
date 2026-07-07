@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -19,12 +21,14 @@ def test_seed_hydrate_smoke_runs_seed_extract_in_temp_copy(
     (out / ".graphify_root").write_text(str(project), encoding="utf-8")
 
     calls = []
+    subprocess_kwargs = []
     real_run = subprocess.run
 
     def fake_run(args, **kwargs):
         if "cwd" not in kwargs:
             return real_run(args, **kwargs)
         calls.append(args)
+        subprocess_kwargs.append(kwargs)
         audit_path = kwargs["cwd"] / "graphify-out" / "extraction-audit.json"
         audit_path.parent.mkdir(exist_ok=True)
         audit_path.write_text(
@@ -41,6 +45,7 @@ def test_seed_hydrate_smoke_runs_seed_extract_in_temp_copy(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setenv("PYTHONPATH", "already-here")
     monkeypatch.setattr(
         mainmod.sys,
         "argv",
@@ -63,6 +68,15 @@ def test_seed_hydrate_smoke_runs_seed_extract_in_temp_copy(
     ]
     assert str(project) not in calls[0]
     assert "--seed" in calls[0]
+    assert subprocess_kwargs[0]["cwd"] != project
+    assert subprocess_kwargs[0]["cwd"].name == project.name
+
+    child_env = subprocess_kwargs[0]["env"]
+    repo_root = str(Path(mainmod.__file__).resolve().parent.parent)
+    assert child_env["PYTHONPATH"].split(os.pathsep)[:2] == [
+        repo_root,
+        "already-here",
+    ]
 
 
 def test_seed_hydrate_smoke_exits_nonzero_when_seed_reextracts(
