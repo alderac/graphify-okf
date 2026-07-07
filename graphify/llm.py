@@ -1975,9 +1975,22 @@ def _extract_with_adaptive_retry(
             )
             return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0, "model": model, "finish_reason": "stop"}
         if _depth >= max_depth:
+            msg = (
+                f"chunk of {len(chunk)} still overflows context at recursion depth {_depth} "
+                f"(max {max_depth})"
+            )
+            _emit_warning(
+                on_warning,
+                "chunk_failed",
+                msg,
+                chunk_size=len(chunk),
+                depth=_depth,
+                max_depth=max_depth,
+            )
+            if strict:
+                raise StrictExtractionError(msg) from exc
             print(
-                f"[graphify] chunk of {len(chunk)} still overflows context at "
-                f"recursion depth {_depth} (max {max_depth}) — dropping",
+                f"[graphify] {msg} — dropping",
                 file=sys.stderr,
             )
             return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0, "model": model, "finish_reason": "stop"}

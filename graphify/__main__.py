@@ -4773,7 +4773,7 @@ def main() -> None:
 
                 def _semantic_warning(event: dict) -> None:
                     details = dict(event.get("details") or {})
-                    source_file = details.pop("source_file", None)
+                    source_file = event.get("source_file") or details.pop("source_file", None)
                     _audit_warning(
                         audit,
                         event.get("code", "chunk_failed"),
@@ -4809,6 +4809,10 @@ def main() -> None:
                         file=sys.stderr,
                     )
                     fresh = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0}
+
+                for warning in fresh.get("warnings", []):
+                    if isinstance(warning, dict):
+                        _semantic_warning(warning)
 
                 if len(uncached_paths) == 1:
                     _only_source = str(uncached_paths[0])

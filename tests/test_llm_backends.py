@@ -1300,3 +1300,32 @@ def test_strict_retry_raises_instead_of_keeping_partial_single_file(tmp_path):
 
     assert warnings
     assert warnings[0]["code"] == "partial_truncation"
+
+
+def test_strict_retry_raises_when_multifile_context_overflows_at_max_depth(tmp_path):
+    first = tmp_path / "one.md"
+    second = tmp_path / "two.md"
+    first.write_text("# One\n")
+    second.write_text("# Two\n")
+
+    def fake_extract(*_, **__):
+        raise RuntimeError("context_length_exceeded")
+
+    warnings = []
+    with patch("graphify.llm.extract_files_direct", side_effect=fake_extract):
+        with pytest.raises(llm.StrictExtractionError):
+            llm._extract_with_adaptive_retry(
+                [first, second],
+                backend="kimi",
+                api_key="k",
+                model="m",
+                root=tmp_path,
+                max_depth=0,
+                strict=True,
+                on_warning=warnings.append,
+            )
+
+    assert warnings
+    assert warnings[0]["code"] == "chunk_failed"
+    assert warnings[0]["details"]["chunk_size"] == 2
+    assert warnings[0]["details"]["depth"] == 0
