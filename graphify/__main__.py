@@ -4515,6 +4515,7 @@ def main() -> None:
         stages = _StageTimer(cli_timing)
         from graphify.audit import (
             add_warning as _audit_warning,
+            backfill_single_file_source as _backfill_single_file_source,
             new_extraction_audit as _new_audit,
             record_cache_status as _audit_cache,
             record_collisions as _audit_collisions,
@@ -4533,11 +4534,6 @@ def main() -> None:
             _write_audit(audit, audit_path)
             print(message, file=sys.stderr)
             sys.exit(code)
-
-        def _backfill_single_source(items: list[dict], source_file: str) -> None:
-            for item in items:
-                if isinstance(item, dict) and not item.get("source_file"):
-                    item["source_file"] = source_file
 
         from graphify.detect import (
             detect as _detect,
@@ -4815,10 +4811,7 @@ def main() -> None:
                         _semantic_warning(warning)
 
                 if len(uncached_paths) == 1:
-                    _only_source = str(uncached_paths[0])
-                    _backfill_single_source(fresh.get("nodes", []), _only_source)
-                    _backfill_single_source(fresh.get("edges", []), _only_source)
-                    _backfill_single_source(fresh.get("hyperedges", []), _only_source)
+                    _backfill_single_file_source(fresh, str(uncached_paths[0]))
 
                 # on_chunk_done only fires after a chunk succeeds. If fresh
                 # semantic extraction was requested and no chunks completed,
@@ -4850,6 +4843,9 @@ def main() -> None:
                 sem_result["hyperedges"].extend(fresh.get("hyperedges", []))
                 sem_result["input_tokens"] += fresh.get("input_tokens", 0)
                 sem_result["output_tokens"] += fresh.get("output_tokens", 0)
+
+            if len(semantic_files) == 1:
+                _backfill_single_file_source(sem_result, str(semantic_files[0]))
 
         # Prune orphaned semantic cache entries. The semantic cache is
         # content-hash-keyed and unversioned, so it is never swept by the AST

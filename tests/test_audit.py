@@ -4,6 +4,7 @@ import json
 
 from graphify.audit import (
     add_warning,
+    backfill_single_file_source,
     find_node_id_collisions,
     find_source_attribution_violations,
     new_extraction_audit,
@@ -63,6 +64,22 @@ def test_source_attribution_checks_edges_and_links_when_both_present():
 
     assert {"kind": "edge", "index": 0, "id": "a->b"} in violations
     assert {"kind": "edge", "index": 0, "id": "a->c"} in violations
+
+
+def test_backfill_single_file_source_fills_all_artifact_kinds():
+    extraction = {
+        "nodes": [{"id": "a", "label": "A", "file_type": "document"}],
+        "edges": [{"source": "a", "target": "a", "relation": "references", "confidence": "EXTRACTED"}],
+        "links": [{"source": "a", "target": "b", "relation": "mentions", "confidence": "EXTRACTED"}],
+        "hyperedges": [{"id": "h", "label": "H", "nodes": ["a", "b", "c"], "relation": "form"}],
+    }
+
+    backfill_single_file_source(extraction, "docs/one.md")
+
+    assert extraction["nodes"][0]["source_file"] == "docs/one.md"
+    assert extraction["edges"][0]["source_file"] == "docs/one.md"
+    assert extraction["links"][0]["source_file"] == "docs/one.md"
+    assert extraction["hyperedges"][0]["source_file"] == "docs/one.md"
 
 
 def test_collision_report_persists_old_and_new_sources():

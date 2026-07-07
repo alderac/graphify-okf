@@ -174,6 +174,13 @@ def find_source_attribution_violations(extraction: dict[str, Any]) -> list[dict[
     return violations
 
 
+def backfill_single_file_source(extraction: dict[str, Any], source_file: str) -> None:
+    for bucket in ("nodes", "edges", "links", "hyperedges"):
+        for item in extraction.get(bucket, []) or []:
+            if isinstance(item, dict) and not item.get("source_file"):
+                item["source_file"] = source_file
+
+
 def find_node_id_collisions(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for node in nodes:
