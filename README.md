@@ -60,9 +60,9 @@ graphify seed hydrate-smoke . --json
 
 Seed mode writes `graphify-out/extraction-audit.json` and exits non-zero on
 cache misses, missing `source_file`, invalid JSON, hollow model responses,
-unrecovered truncation, semantic node ID collisions, or unparseable label
-batches. Community label fallback is recorded in the audit as low severity and
-does not block extraction.
+unrecovered truncation, or semantic node ID collisions. Community label
+fallback is recorded in the audit as low severity and does not block
+extraction.
 
 For a readable architecture page with Mermaid call-flow diagrams, run:
 

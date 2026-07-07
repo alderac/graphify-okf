@@ -50,7 +50,7 @@ Turn any folder of files into a navigable knowledge graph with community detecti
 
 Drop any folder of code, docs, papers, images, or video into graphify and get a queryable knowledge graph. Persistent across sessions, honest audit trail (EXTRACTED/INFERRED/AMBIGUOUS), community detection surfaces cross-document connections you wouldn't think to ask about.
 
-`graphify extract` is best-effort by default. For a canonical reusable seed, run `graphify cache status <path> --json` first, then `graphify extract <path> --seed`. Seed mode writes `graphify-out/extraction-audit.json` and exits non-zero on seed-corrupting warnings such as cache misses, missing `source_file`, invalid JSON, hollow responses, unrecovered truncation, node ID collisions, and unparseable label batches. After building a seed, `graphify seed hydrate-smoke <path> --json` copies it into a temp project, rewrites local pointers, runs update, and confirms no semantic re-extraction is needed.
+`graphify extract` is best-effort by default. For a canonical reusable seed, run `graphify cache status <path> --json` first, then `graphify extract <path> --seed`. Seed mode writes `graphify-out/extraction-audit.json` and exits non-zero on seed-corrupting warnings such as cache misses, missing `source_file`, invalid JSON, hollow responses, unrecovered truncation, and node ID collisions. Community label fallback is recorded as low-severity audit info and does not block extraction. After building a seed, `graphify seed hydrate-smoke <path> --json` copies it into a temp project, rewrites local pointers, runs update, and confirms no semantic re-extraction is needed.
 
 ## What You Must Do When Invoked
 
