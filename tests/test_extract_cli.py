@@ -193,6 +193,57 @@ def test_extract_succeeds_when_at_least_one_chunk_completes(
     )
 
 
+def test_extract_audit_records_semantic_warning_and_backend_route(
+    monkeypatch, tmp_path
+):
+    corpus = _make_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-key")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+
+    def _chunk_warned(paths, **kwargs):
+        on_warning = kwargs.get("on_warning")
+        if on_warning:
+            on_warning(
+                {
+                    "code": "hollow_response",
+                    "message": "backend returned no usable nodes or edges",
+                    "details": {"source_file": str(paths[0]), "chunk_index": 0},
+                }
+            )
+        on_chunk = kwargs.get("on_chunk_done")
+        if on_chunk:
+            on_chunk(0, 1, {"nodes": [], "edges": [], "hyperedges": []})
+        return {
+            "nodes": [{"id": "readme", "label": "Readme", "source_file": str(paths[0])}],
+            "edges": [],
+            "hyperedges": [],
+            "input_tokens": 10,
+            "output_tokens": 5,
+        }
+
+    monkeypatch.setattr("graphify.llm.extract_corpus_parallel", _chunk_warned)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus), "--backend", "claude", "--out", str(out_dir)],
+    )
+
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
+
+    import json
+
+    audit = json.loads((out_dir / "graphify-out" / "extraction-audit.json").read_text())
+    assert audit["backend"]["route"] == "anthropic"
+    assert audit["backend"]["model"] == "claude-sonnet-4-6"
+    warning = next(w for w in audit["warnings"] if w["code"] == "hollow_response")
+    assert warning["source_file"].endswith("README.md")
+    assert warning["details"]["chunk_index"] == 0
+
+
 def _code_only_corpus(tmp_path):
     """A corpus with only code — no docs/papers/images."""
     (tmp_path / "auth.py").write_text(

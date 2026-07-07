@@ -552,18 +552,18 @@ def test_call_openai_compat_relabels_none_content_as_length(monkeypatch):
     assert result["finish_reason"] == "length"
 
 
-def test_call_openai_compat_relabels_unparseable_json_as_length(monkeypatch):
-    # A half-generated response: `{"nodes": [{"id":` parses to {} (empty
-    # fragment) via _parse_llm_json's JSONDecodeError fallback. That is also
-    # hollow and must trigger bisection.
+def test_call_openai_compat_raises_invalid_json_for_unparseable_json(monkeypatch):
+    # A half-generated response is not hollow; it is an explicit parse failure
+    # so strict/audit callers can record `invalid_json` instead of treating the
+    # chunk as a valid empty fragment.
     fake_resp = _fake_openai_response('{"nodes": [{"id":', finish_reason="stop", completion_tokens=20)
     _install_fake_openai(monkeypatch, fake_resp)
 
-    result = llm._call_openai_compat(
-        "http://localhost:11434/v1", "ollama", "qwen2.5-coder:7b",
-        "u", temperature=0, max_completion_tokens=8192, backend="ollama",
-    )
-    assert result["finish_reason"] == "length"
+    with pytest.raises(ValueError, match="^invalid_json:"):
+        llm._call_openai_compat(
+            "http://localhost:11434/v1", "ollama", "qwen2.5-coder:7b",
+            "u", temperature=0, max_completion_tokens=8192, backend="ollama",
+        )
 
 
 def test_call_openai_compat_preserves_real_finish_reason(monkeypatch):
@@ -1238,3 +1238,65 @@ def test_call_llm_openai_compat_client_built_with_timeout_and_retries(monkeypatc
     llm._call_llm("hi", backend="kimi")
     assert ctor_kwargs.get("timeout") == 1.0, ctor_kwargs
     assert ctor_kwargs.get("max_retries", 0) >= 5, ctor_kwargs
+
+
+def test_backend_route_info_shows_native_gemini_structured_output(monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
+    monkeypatch.setitem(
+        llm.BACKENDS["gemini"],
+        "base_url",
+        "https://generativelanguage.googleapis.com/v1beta/openai/",
+    )
+
+    info = llm.backend_route_info("gemini")
+
+    assert info["name"] == "gemini"
+    assert info["model"] == "gemini-3-flash-preview"
+    assert info["route"] == "google-genai"
+    assert info["native_structured_output"] is True
+    assert info["fell_back_to_openai_compat"] is False
+
+
+def test_backend_route_info_shows_custom_gemini_openai_compat(monkeypatch):
+    monkeypatch.setitem(llm.BACKENDS["gemini"], "base_url", "https://proxy.example/v1")
+
+    info = llm.backend_route_info("gemini", model="gemini-proxy")
+
+    assert info["base_url"] == "https://proxy.example/v1"
+    assert info["route"] == "openai-compatible"
+    assert info["native_structured_output"] is False
+    assert info["fell_back_to_openai_compat"] is True
+
+
+def test_strict_retry_raises_instead_of_keeping_partial_single_file(tmp_path):
+    f = tmp_path / "doc.md"
+    f.write_text("# Doc\n\nBody\n")
+
+    def fake_extract(*_, **__):
+        return {
+            "nodes": [{"id": "doc", "source_file": "doc.md"}],
+            "edges": [],
+            "hyperedges": [],
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "model": "m",
+            "finish_reason": "length",
+        }
+
+    warnings = []
+    with patch("graphify.llm.extract_files_direct", side_effect=fake_extract):
+        with pytest.raises(llm.StrictExtractionError):
+            llm._extract_with_adaptive_retry(
+                [f],
+                backend="kimi",
+                api_key="k",
+                model="m",
+                root=tmp_path,
+                max_depth=0,
+                strict=True,
+                on_warning=warnings.append,
+            )
+
+    assert warnings
+    assert warnings[0]["code"] == "partial_truncation"

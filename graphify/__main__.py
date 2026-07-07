@@ -4518,6 +4518,7 @@ def main() -> None:
             new_extraction_audit as _new_audit,
             record_cache_status as _audit_cache,
             record_collisions as _audit_collisions,
+            record_backend as _audit_backend,
             record_detection as _audit_detection,
             record_source_attribution as _audit_source_attribution,
             strict_failures as _audit_strict_failures,
@@ -4609,6 +4610,7 @@ def main() -> None:
         # an API key; the key is enforced below only when there's LLM work.
         from graphify.llm import (
             BACKENDS as _BACKENDS,
+            backend_route_info as _backend_route_info,
             detect_backend as _detect_backend,
             estimate_cost as _estimate_cost,
             extract_corpus_parallel as _extract_corpus_parallel,
@@ -4625,6 +4627,8 @@ def main() -> None:
             )
         audit["backend"]["name"] = backend
         audit["backend"]["model"] = model
+        if backend is not None:
+            _audit_backend(audit, _backend_route_info(backend, model=model))
         if needs_llm:
             if backend is None:
                 reasons = []
@@ -4766,6 +4770,19 @@ def main() -> None:
                         flush=True,
                     )
                 corpus_kwargs["on_chunk_done"] = _progress
+
+                def _semantic_warning(event: dict) -> None:
+                    details = dict(event.get("details") or {})
+                    source_file = details.pop("source_file", None)
+                    _audit_warning(
+                        audit,
+                        event.get("code", "chunk_failed"),
+                        event.get("message", "semantic extraction warning"),
+                        source_file=source_file,
+                        details=details,
+                    )
+                corpus_kwargs["strict"] = strict_mode
+                corpus_kwargs["on_warning"] = _semantic_warning
 
                 try:
                     fresh = _extract_corpus_parallel(

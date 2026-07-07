@@ -862,7 +862,7 @@ _LLM_JSON_MAX_BYTES = 10 * 1024 * 1024  # 10 MB hard cap before json.loads (F-01
 
 
 def _parse_llm_json(raw: str) -> dict:
-    """Strip optional markdown fences and parse JSON. Returns empty fragment on failure.
+    """Strip optional markdown fences and parse JSON.
 
     Caps the input at `_LLM_JSON_MAX_BYTES` so a hostile or runaway model
     response cannot exhaust memory inside `json.loads` (F-016).
@@ -873,7 +873,10 @@ def _parse_llm_json(raw: str) -> dict:
             f"({len(raw)} bytes); refusing to parse and dropping chunk.",
             file=sys.stderr,
         )
-        return {"nodes": [], "edges": [], "hyperedges": []}
+        raise ValueError(
+            f"invalid_json: LLM response exceeds {_LLM_JSON_MAX_BYTES} bytes; "
+            f"first 500 chars: {raw[:500]!r}"
+        )
     # Strategy 1: strip whitespace, then handle markdown fences anywhere in the
     # text (not only at offset 0 — the original code only stripped fences when
     # `raw.startswith("```")`, missing the common case where Claude prepends a
@@ -933,12 +936,7 @@ def _parse_llm_json(raw: str) -> dict:
                         break
                     except json.JSONDecodeError:
                         break
-    print(
-        f"[graphify] LLM returned invalid JSON, skipping chunk "
-        f"(first 200 chars: {raw[:200]!r})",
-        file=sys.stderr,
-    )
-    return {"nodes": [], "edges": [], "hyperedges": []}
+    raise ValueError(f"invalid_json: could not parse LLM JSON response; first 500 chars: {raw[:500]!r}")
 
 
 def _response_is_hollow(raw_content: str | None, parsed: dict) -> bool:
@@ -959,6 +957,12 @@ def _response_is_hollow(raw_content: str | None, parsed: dict) -> bool:
     edges = parsed.get("edges")
     hyperedges = parsed.get("hyperedges")
     return not nodes and not edges and not hyperedges
+
+
+def _mark_hollow_response(result: dict) -> None:
+    result.setdefault("warnings", []).append(
+        {"code": "hollow_response", "message": "backend returned no usable nodes or edges"}
+    )
 
 
 def _backend_env_keys(backend: str) -> list[str]:
@@ -1026,6 +1030,44 @@ def _gemini_uses_native_structured_output(base_url: str) -> bool:
     request shape, so they stay on ``_call_openai_compat``.
     """
     return _same_base_url(base_url, _GEMINI_OPENAI_COMPAT_BASE_URL)
+
+
+def backend_route_info(backend: str | None, model: str | None = None) -> dict:
+    if not backend or backend not in BACKENDS:
+        return {
+            "name": backend,
+            "model": model,
+            "base_url": None,
+            "route": None,
+            "native_structured_output": False,
+            "fell_back_to_openai_compat": False,
+        }
+    cfg = BACKENDS[backend]
+    resolved_model = model or _default_model_for_backend(backend)
+    base_url = cfg.get("base_url")
+    native = backend == "gemini" and _gemini_uses_native_structured_output(base_url or "")
+    if backend == "gemini":
+        route = "google-genai" if native else "openai-compatible"
+    elif backend in ("kimi", "openai", "deepseek", "ollama"):
+        route = "openai-compatible"
+    elif backend == "azure":
+        route = "azure-openai"
+    elif backend == "claude":
+        route = "anthropic"
+    elif backend == "claude-cli":
+        route = "claude-cli"
+    elif backend == "bedrock":
+        route = "bedrock"
+    else:
+        route = "custom"
+    return {
+        "name": backend,
+        "model": resolved_model,
+        "base_url": base_url,
+        "route": route,
+        "native_structured_output": native,
+        "fell_back_to_openai_compat": backend == "gemini" and not native,
+    }
 
 
 def _gemini_content(user_message: str, refs: list[_ImageRef], types_module):
@@ -1126,6 +1168,7 @@ def _call_gemini_native(
     result["model"] = model
     result["finish_reason"] = _gemini_finish_reason(resp.candidates[0].finish_reason)
     if _response_is_hollow(raw_content, result) and result["finish_reason"] != "length":
+        _mark_hollow_response(result)
         print(
             "[graphify] gemini returned a hollow response; treating as "
             "truncation so adaptive retry can bisect the chunk.",
@@ -1249,6 +1292,7 @@ def _call_openai_compat(
     # dropped from the corpus. Re-label as `"length"` so the adaptive retry
     # layer bisects the chunk — same recovery as a true truncation.
     if _response_is_hollow(raw_content, result) and result["finish_reason"] != "length":
+        _mark_hollow_response(result)
         print(
             f"[graphify] {backend or 'backend'} returned a hollow response "
             f"(content={'empty' if not (raw_content or '').strip() else 'no nodes/edges'}, "
@@ -1300,6 +1344,7 @@ def _call_claude(api_key: str, model: str, user_message: str, max_tokens: int = 
     # backend produced the result.
     result["finish_reason"] = "length" if resp.stop_reason == "max_tokens" else "stop"
     if _response_is_hollow(raw_content, result) and result["finish_reason"] != "length":
+        _mark_hollow_response(result)
         print(
             "[graphify] claude returned a hollow response; treating as "
             "truncation so adaptive retry can bisect the chunk.",
@@ -1445,6 +1490,7 @@ def _call_claude_cli(user_message: str, max_tokens: int = 8192, *, deep_mode: bo
     stop_reason = envelope.get("stop_reason", "")
     result["finish_reason"] = "length" if stop_reason == "max_tokens" else "stop"
     if _response_is_hollow(raw_content, result) and result["finish_reason"] != "length":
+        _mark_hollow_response(result)
         print(
             "[graphify] claude-cli returned a hollow response; treating as "
             "truncation so adaptive retry can bisect the chunk.",
@@ -1508,6 +1554,7 @@ def _call_azure(
     result["model"] = model
     result["finish_reason"] = resp.choices[0].finish_reason
     if _response_is_hollow(raw_content, result) and result["finish_reason"] != "length":
+        _mark_hollow_response(result)
         print(
             "[graphify] azure returned a hollow response; treating as "
             "truncation so adaptive retry can bisect the chunk.",
@@ -1552,6 +1599,7 @@ def _call_bedrock(model: str, user_message: str, max_tokens: int = 8192, *, deep
     result["model"] = model
     result["finish_reason"] = "length" if resp.get("stopReason") == "max_tokens" else "stop"
     if _response_is_hollow(text, result) and result["finish_reason"] != "length":
+        _mark_hollow_response(result)
         print(
             "[graphify] bedrock returned a hollow response; treating as "
             "truncation so adaptive retry can bisect the chunk.",
@@ -1784,6 +1832,15 @@ _CONTEXT_EXCEEDED_MARKERS = (
 )
 
 
+class StrictExtractionError(RuntimeError):
+    """Raised when strict/seed extraction would otherwise keep partial output."""
+
+
+def _emit_warning(on_warning: Callable | None, code: str, message: str, **details) -> None:
+    if callable(on_warning):
+        on_warning({"code": code, "message": message, "details": details})
+
+
 def _looks_like_context_exceeded(exc: BaseException) -> bool:
     """Heuristically classify an exception as a context-window overflow.
 
@@ -1808,6 +1865,8 @@ def _extract_with_adaptive_retry(
     _depth: int = 0,
     *,
     deep_mode: bool = False,
+    strict: bool = False,
+    on_warning: Callable | None = None,
 ) -> dict:
     """Extract a chunk; if the response is truncated (`finish_reason="length"`)
     or the API rejects the prompt as too large for the model's context window,
@@ -1827,7 +1886,7 @@ def _extract_with_adaptive_retry(
       same reason.
 
     - hollow successful responses — the model returned HTTP 200 with empty,
-      null, or unparseable content (typical of a local Ollama under load).
+      null, or valid-but-empty content (typical of a local Ollama under load).
       `_call_openai_compat` re-labels these as `finish_reason="length"` so they
       take the same recovery path; without that the chunk would be silently
       dropped from the corpus.
@@ -1844,10 +1903,28 @@ def _extract_with_adaptive_retry(
     """
     def _merge_two(left_units, right_units) -> dict:
         left = _extract_with_adaptive_retry(
-            left_units, backend, api_key, model, root, max_depth, _depth + 1, deep_mode=deep_mode
+            left_units,
+            backend,
+            api_key,
+            model,
+            root,
+            max_depth,
+            _depth + 1,
+            deep_mode=deep_mode,
+            strict=strict,
+            on_warning=on_warning,
         )
         right = _extract_with_adaptive_retry(
-            right_units, backend, api_key, model, root, max_depth, _depth + 1, deep_mode=deep_mode
+            right_units,
+            backend,
+            api_key,
+            model,
+            root,
+            max_depth,
+            _depth + 1,
+            deep_mode=deep_mode,
+            strict=strict,
+            on_warning=on_warning,
         )
         return {
             "nodes": left.get("nodes", []) + right.get("nodes", []),
@@ -1855,6 +1932,7 @@ def _extract_with_adaptive_retry(
             "hyperedges": left.get("hyperedges", []) + right.get("hyperedges", []),
             "input_tokens": left.get("input_tokens", 0) + right.get("input_tokens", 0),
             "output_tokens": left.get("output_tokens", 0) + right.get("output_tokens", 0),
+            "warnings": left.get("warnings", []) + right.get("warnings", []),
             "model": model,
             "finish_reason": "stop",
         }
@@ -1882,6 +1960,14 @@ def _extract_with_adaptive_retry(
                     file=sys.stderr,
                 )
                 return _merge_two([halves[0]], [halves[1]])
+            _emit_warning(
+                on_warning,
+                "chunk_failed",
+                f"single-file chunk {unit_path(chunk[0])} exceeds model context and cannot be split further",
+                source_file=str(unit_path(chunk[0])),
+            )
+            if strict:
+                raise StrictExtractionError(str(exc)) from exc
             print(
                 f"[graphify] single-file chunk {unit_path(chunk[0])} exceeds model context "
                 f"and cannot be split further: {exc}",
@@ -1902,10 +1988,28 @@ def _extract_with_adaptive_retry(
         )
         mid = len(chunk) // 2
         left = _extract_with_adaptive_retry(
-            chunk[:mid], backend, api_key, model, root, max_depth, _depth + 1, deep_mode=deep_mode
+            chunk[:mid],
+            backend,
+            api_key,
+            model,
+            root,
+            max_depth,
+            _depth + 1,
+            deep_mode=deep_mode,
+            strict=strict,
+            on_warning=on_warning,
         )
         right = _extract_with_adaptive_retry(
-            chunk[mid:], backend, api_key, model, root, max_depth, _depth + 1, deep_mode=deep_mode
+            chunk[mid:],
+            backend,
+            api_key,
+            model,
+            root,
+            max_depth,
+            _depth + 1,
+            deep_mode=deep_mode,
+            strict=strict,
+            on_warning=on_warning,
         )
         return {
             "nodes": left.get("nodes", []) + right.get("nodes", []),
@@ -1913,6 +2017,7 @@ def _extract_with_adaptive_retry(
             "hyperedges": left.get("hyperedges", []) + right.get("hyperedges", []),
             "input_tokens": left.get("input_tokens", 0) + right.get("input_tokens", 0),
             "output_tokens": left.get("output_tokens", 0) + right.get("output_tokens", 0),
+            "warnings": left.get("warnings", []) + right.get("warnings", []),
             "model": model,
             "finish_reason": "stop",
         }
@@ -1929,17 +2034,26 @@ def _extract_with_adaptive_retry(
                 file=sys.stderr,
             )
             return _merge_two([halves[0]], [halves[1]])
+        msg = f"single-file chunk {unit_path(chunk[0])} truncated at max_completion_tokens"
+        _emit_warning(on_warning, "partial_truncation", msg, source_file=str(unit_path(chunk[0])))
+        if strict:
+            raise StrictExtractionError(msg)
         print(
-            f"[graphify] single-file chunk {unit_path(chunk[0])} truncated at "
-            f"max_completion_tokens — partial result kept",
+            f"[graphify] {msg} - partial result kept",
             file=sys.stderr,
         )
         return result
 
     if _depth >= max_depth:
+        msg = (
+            f"chunk of {len(chunk)} still truncated at recursion depth {_depth} "
+            f"(max {max_depth})"
+        )
+        _emit_warning(on_warning, "partial_truncation", msg, chunk_size=len(chunk), depth=_depth)
+        if strict:
+            raise StrictExtractionError(msg)
         print(
-            f"[graphify] chunk of {len(chunk)} still truncated at recursion "
-            f"depth {_depth} (max {max_depth}) — partial result kept",
+            f"[graphify] {msg} - partial result kept",
             file=sys.stderr,
         )
         return result
@@ -1952,10 +2066,28 @@ def _extract_with_adaptive_retry(
     )
     mid = len(chunk) // 2
     left = _extract_with_adaptive_retry(
-        chunk[:mid], backend, api_key, model, root, max_depth, _depth + 1, deep_mode=deep_mode
+        chunk[:mid],
+        backend,
+        api_key,
+        model,
+        root,
+        max_depth,
+        _depth + 1,
+        deep_mode=deep_mode,
+        strict=strict,
+        on_warning=on_warning,
     )
     right = _extract_with_adaptive_retry(
-        chunk[mid:], backend, api_key, model, root, max_depth, _depth + 1, deep_mode=deep_mode
+        chunk[mid:],
+        backend,
+        api_key,
+        model,
+        root,
+        max_depth,
+        _depth + 1,
+        deep_mode=deep_mode,
+        strict=strict,
+        on_warning=on_warning,
     )
 
     return {
@@ -1964,6 +2096,7 @@ def _extract_with_adaptive_retry(
         "hyperedges": left.get("hyperedges", []) + right.get("hyperedges", []),
         "input_tokens": left.get("input_tokens", 0) + right.get("input_tokens", 0),
         "output_tokens": left.get("output_tokens", 0) + right.get("output_tokens", 0),
+        "warnings": left.get("warnings", []) + right.get("warnings", []),
         "model": result.get("model"),
         # Both halves either succeeded or have already surfaced their own
         # truncation warning; the merged result is no longer truncated as a
@@ -1984,6 +2117,8 @@ def extract_corpus_parallel(
     max_concurrency: int = 4,
     max_retry_depth: int = 3,
     deep_mode: bool = False,
+    strict: bool = False,
+    on_warning: Callable | None = None,
 ) -> dict:
     """Extract a corpus in chunks, merging results.
 
@@ -2036,6 +2171,7 @@ def extract_corpus_parallel(
         "nodes": [], "edges": [], "hyperedges": [],
         "input_tokens": 0, "output_tokens": 0,
         "failed_chunks": 0,  # count of chunks that raised — loud failure on chunk errors
+        "warnings": [],
     }
     total = len(chunks)
 
@@ -2050,10 +2186,20 @@ def extract_corpus_parallel(
                 root=root,
                 max_depth=max_retry_depth,
                 deep_mode=deep_mode,
+                strict=strict,
+                on_warning=on_warning,
             )
             result["elapsed_seconds"] = round(time.time() - t0, 2)
             return idx, result, None
         except Exception as exc:  # noqa: BLE001 — caller-facing surface, log + continue
+            code = "invalid_json" if str(exc).startswith("invalid_json:") else "chunk_failed"
+            _emit_warning(
+                on_warning,
+                code,
+                f"chunk {idx + 1}/{total} failed: {exc}",
+                chunk_index=idx,
+                total_chunks=total,
+            )
             return idx, None, exc
 
     # Ollama serves one request at a time per loaded model on a single GPU.
@@ -2115,6 +2261,7 @@ def _merge_into(merged: dict, result: dict) -> None:
     merged["hyperedges"].extend(result.get("hyperedges", []))
     merged["input_tokens"] += result.get("input_tokens", 0)
     merged["output_tokens"] += result.get("output_tokens", 0)
+    merged.setdefault("warnings", []).extend(result.get("warnings", []))
 
 
 def _call_llm(
