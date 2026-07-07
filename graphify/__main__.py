@@ -4709,6 +4709,7 @@ def main() -> None:
             check_semantic_cache as _check_semantic_cache,
             prune_semantic_cache as _prune_semantic_cache,
             save_semantic_cache as _save_semantic_cache,
+            semantic_cache_collisions as _semantic_cache_collisions,
         )
         sem_result: dict = {
             "nodes": [], "edges": [], "hyperedges": [],
@@ -4729,6 +4730,9 @@ def main() -> None:
             sem_result["nodes"].extend(cached_nodes)
             sem_result["edges"].extend(cached_edges)
             sem_result["hyperedges"].extend(cached_hyperedges)
+            semantic_namespace_collisions.extend(
+                _semantic_cache_collisions(hit_paths, root=out_root)
+            )
             _cached_remap, _cached_collisions = _namespace_semantic_node_ids(sem_result, target)
             semantic_namespace_collisions.extend(_cached_collisions)
             if sem_cache_hits:
@@ -4840,6 +4844,7 @@ def main() -> None:
                         fresh.get("nodes", []),
                         fresh.get("edges", []),
                         fresh.get("hyperedges", []),
+                        collisions=_fresh_collisions,
                         root=out_root,
                     )
                 except Exception as exc:

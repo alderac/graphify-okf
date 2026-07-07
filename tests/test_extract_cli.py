@@ -105,6 +105,87 @@ def test_extract_seed_fails_on_semantic_cache_miss(monkeypatch, tmp_path, capsys
     assert "strict/seed mode failed" in capsys.readouterr().err
 
 
+def test_extract_strict_cache_hit_preserves_node_collision_audit(
+    monkeypatch, tmp_path, capsys
+):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a = corpus / "a.md"
+    b = corpus / "b.md"
+    a.write_text("# A\n", encoding="utf-8")
+    b.write_text("# B\n", encoding="utf-8")
+    out_dir = tmp_path / "out"
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake-key")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+
+    def _colliding_extract(paths, **kwargs):
+        kwargs["on_chunk_done"](0, 1, {})
+        return {
+            "nodes": [
+                {"id": "shared_concept", "label": "Shared", "source_file": str(paths[0])},
+                {"id": "shared_concept", "label": "Shared", "source_file": str(paths[1])},
+            ],
+            "edges": [],
+            "hyperedges": [],
+            "input_tokens": 1,
+            "output_tokens": 1,
+        }
+
+    monkeypatch.setattr("graphify.llm.extract_corpus_parallel", _colliding_extract)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        [
+            "graphify",
+            "extract",
+            str(corpus),
+            "--backend",
+            "claude",
+            "--out",
+            str(out_dir),
+            "--no-cluster",
+        ],
+    )
+    with pytest.raises(SystemExit) as first:
+        mainmod.main()
+    assert first.value.code == 0
+    (out_dir / "graphify-out" / "manifest.json").unlink()
+
+    def _unexpected_extract(*_args, **_kwargs):
+        raise AssertionError("strict cache-hit run must not re-extract semantics")
+
+    monkeypatch.setattr("graphify.llm.extract_corpus_parallel", _unexpected_extract)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        [
+            "graphify",
+            "extract",
+            str(corpus),
+            "--backend",
+            "claude",
+            "--out",
+            str(out_dir),
+            "--strict",
+            "--no-cluster",
+        ],
+    )
+    with pytest.raises(SystemExit) as second:
+        mainmod.main()
+
+    assert second.value.code == 1
+    import json
+
+    audit = json.loads(
+        (out_dir / "graphify-out" / "extraction-audit.json").read_text(encoding="utf-8")
+    )
+    assert audit["cache"]["semantic_cache_hits"] == 2
+    assert any(collision["id"] == "shared_concept" for collision in audit["collisions"])
+    assert any(failure["code"] == "node_id_collision" for failure in audit["strict_failures"])
+    assert "strict/seed mode failed" in capsys.readouterr().err
+
+
 def test_extract_postgres_failure_writes_audit_before_exit(
     monkeypatch, tmp_path, capsys
 ):
