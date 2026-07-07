@@ -836,6 +836,53 @@ def test_adaptive_retry_bisects_on_hollow_ollama_response(tmp_path):
     assert calls["n"] == 3  # 1 hollow + 2 successful halves
 
 
+def test_adaptive_retry_preserves_hollow_warning_after_successful_split(tmp_path):
+    files = [tmp_path / f"f{i}.md" for i in range(4)]
+    for f in files:
+        f.write_text("hello")
+
+    calls = {"n": 0}
+    trigger_warning = {
+        "code": "hollow_response",
+        "message": "backend returned no usable nodes or edges",
+        "details": {"chunk_size": 4},
+    }
+
+    def fake_extract(chunk, *_, **__):
+        calls["n"] += 1
+        if len(chunk) == 4:
+            return {
+                "nodes": [],
+                "edges": [],
+                "hyperedges": [],
+                "warnings": [trigger_warning],
+                "input_tokens": 100,
+                "output_tokens": 0,
+                "model": "m",
+                "finish_reason": "length",
+            }
+        return _ok(nodes=[{"id": f.stem} for f in chunk])
+
+    callback_warnings = []
+    with patch("graphify.llm.extract_files_direct", side_effect=fake_extract):
+        result = llm._extract_with_adaptive_retry(
+            files,
+            backend="ollama",
+            api_key="ollama",
+            model="qwen2.5-coder:7b",
+            root=tmp_path,
+            max_depth=3,
+            strict=True,
+            on_warning=callback_warnings.append,
+        )
+
+    assert len(result["nodes"]) == 4
+    assert result["warnings"][0]["code"] == "hollow_response"
+    assert result["warnings"][0]["details"]["chunk_size"] == 4
+    assert callback_warnings == []
+    assert calls["n"] == 3
+
+
 # ---------------------------------------------------------------------------
 # Azure backend
 # ---------------------------------------------------------------------------

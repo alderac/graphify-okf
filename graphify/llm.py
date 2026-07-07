@@ -1901,7 +1901,11 @@ def _extract_with_adaptive_retry(
     non-splittable file (e.g. one huge code file) can't be made smaller than
     itself, so we return what we got and warn.
     """
-    def _merge_two(left_units, right_units) -> dict:
+    def _merge_two(
+        left_units,
+        right_units,
+        trigger_warnings: list[dict] | None = None,
+    ) -> dict:
         left = _extract_with_adaptive_retry(
             left_units,
             backend,
@@ -1932,7 +1936,11 @@ def _extract_with_adaptive_retry(
             "hyperedges": left.get("hyperedges", []) + right.get("hyperedges", []),
             "input_tokens": left.get("input_tokens", 0) + right.get("input_tokens", 0),
             "output_tokens": left.get("output_tokens", 0) + right.get("output_tokens", 0),
-            "warnings": left.get("warnings", []) + right.get("warnings", []),
+            "warnings": (
+                (trigger_warnings or [])
+                + left.get("warnings", [])
+                + right.get("warnings", [])
+            ),
             "model": model,
             "finish_reason": "stop",
         }
@@ -2046,7 +2054,7 @@ def _extract_with_adaptive_retry(
                 f"splitting the slice and retrying",
                 file=sys.stderr,
             )
-            return _merge_two([halves[0]], [halves[1]])
+            return _merge_two([halves[0]], [halves[1]], result.get("warnings", []))
         msg = f"single-file chunk {unit_path(chunk[0])} truncated at max_completion_tokens"
         _emit_warning(on_warning, "partial_truncation", msg, source_file=str(unit_path(chunk[0])))
         if strict:
@@ -2109,7 +2117,11 @@ def _extract_with_adaptive_retry(
         "hyperedges": left.get("hyperedges", []) + right.get("hyperedges", []),
         "input_tokens": left.get("input_tokens", 0) + right.get("input_tokens", 0),
         "output_tokens": left.get("output_tokens", 0) + right.get("output_tokens", 0),
-        "warnings": left.get("warnings", []) + right.get("warnings", []),
+        "warnings": (
+            result.get("warnings", [])
+            + left.get("warnings", [])
+            + right.get("warnings", [])
+        ),
         "model": result.get("model"),
         # Both halves either succeeded or have already surfaced their own
         # truncation warning; the merged result is no longer truncated as a
