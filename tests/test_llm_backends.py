@@ -56,9 +56,34 @@ def test_openai_backend_detected(monkeypatch):
     assert llm._get_backend_api_key("openai") == "openai-key"
 
 
-def test_extract_files_direct_routes_gemini_through_openai_compat(tmp_path, monkeypatch):
+def test_extract_files_direct_routes_gemini_through_native_structured_output(tmp_path, monkeypatch):
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
+    source = tmp_path / "note.md"
+    source.write_text("# Architecture\n\nThe runner emits a snapshot.\n")
+    result = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 1, "output_tokens": 1}
+
+    with patch("graphify.llm._call_gemini_native", return_value=result) as call:
+        assert llm.extract_files_direct([source], backend="gemini", root=tmp_path) is result
+
+    assert call.call_args.args[:2] == ("google-key", "gemini-3-flash-preview")
+    # Source content is wrapped in an untrusted_source delimiter block (#1210)
+    # rather than the old `=== path ===` separator.
+    user_msg = call.call_args.args[2]
+    assert '<untrusted_source path="note.md" sha256=' in user_msg
+    assert "# Architecture\n\nThe runner emits a snapshot." in user_msg
+    assert user_msg.rstrip().endswith("</untrusted_source>")
+    assert call.call_args.kwargs["temperature"] == 0
+    assert call.call_args.kwargs["reasoning_effort"] == "low"
+    assert call.call_args.kwargs["max_output_tokens"] == 16384
+
+
+def test_extract_files_direct_routes_custom_gemini_base_url_through_openai_compat(
+    tmp_path, monkeypatch
+):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
+    monkeypatch.setitem(llm.BACKENDS["gemini"], "base_url", "https://proxy.example/gemini")
     source = tmp_path / "note.md"
     source.write_text("# Architecture\n\nThe runner emits a snapshot.\n")
     result = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 1, "output_tokens": 1}
@@ -67,18 +92,10 @@ def test_extract_files_direct_routes_gemini_through_openai_compat(tmp_path, monk
         assert llm.extract_files_direct([source], backend="gemini", root=tmp_path) is result
 
     assert call.call_args.args[:3] == (
-        "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "https://proxy.example/gemini",
         "google-key",
         "gemini-3-flash-preview",
     )
-    # Source content is wrapped in an untrusted_source delimiter block (#1210)
-    # rather than the old `=== path ===` separator.
-    user_msg = call.call_args.args[3]
-    assert '<untrusted_source path="note.md" sha256=' in user_msg
-    assert "# Architecture\n\nThe runner emits a snapshot." in user_msg
-    assert user_msg.rstrip().endswith("</untrusted_source>")
-    assert call.call_args.kwargs["temperature"] == 0
-    assert call.call_args.kwargs["reasoning_effort"] == "low"
     assert call.call_args.kwargs["max_completion_tokens"] == 16384
 
 
@@ -117,10 +134,144 @@ def test_gemini_model_can_be_overridden_by_env(tmp_path, monkeypatch):
     source.write_text("# Architecture\n")
     result = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 1, "output_tokens": 1}
 
-    with patch("graphify.llm._call_openai_compat", return_value=result) as call:
+    with patch("graphify.llm._call_gemini_native", return_value=result) as call:
         llm.extract_files_direct([source], backend="gemini", root=tmp_path)
 
-    assert call.call_args.args[2] == "gemini-3.1-pro-preview"
+    assert call.call_args.args[1] == "gemini-3.1-pro-preview"
+
+
+def test_gemini_extraction_schema_requires_graph_contract():
+    schema = llm._GEMINI_EXTRACTION_SCHEMA
+
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == [
+        "nodes",
+        "edges",
+        "hyperedges",
+        "input_tokens",
+        "output_tokens",
+    ]
+    assert "id" in schema["properties"]["nodes"]["items"]["required"]
+    assert "relation" in schema["properties"]["edges"]["items"]["required"]
+    assert "nodes" in schema["properties"]["hyperedges"]["items"]["required"]
+
+
+def test_call_gemini_native_submits_structured_output_schema(monkeypatch, tmp_path):
+    import sys
+    import types as pytypes
+
+    calls = {}
+    part_calls = []
+
+    class _FakePart:
+        @staticmethod
+        def from_text(text):
+            part_calls.append(("text", text))
+            return {"text": text}
+
+        @staticmethod
+        def from_bytes(data, mime_type):
+            part_calls.append(("bytes", data, mime_type))
+            return {"inline_data": {"data": data, "mime_type": mime_type}}
+
+    class _FakeHttpRetryOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _FakeHttpOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            calls["client_kwargs"] = kwargs
+            self.models = self
+
+        def generate_content(self, **kwargs):
+            calls["generate_kwargs"] = kwargs
+            return pytypes.SimpleNamespace(
+                text="",
+                parsed={
+                    "nodes": [
+                        {
+                            "id": "note_runner",
+                            "label": "Runner",
+                            "file_type": "document",
+                            "source_file": "note.md",
+                            "source_location": None,
+                            "source_url": None,
+                            "captured_at": None,
+                            "author": None,
+                            "contributor": None,
+                        }
+                    ],
+                    "edges": [],
+                    "hyperedges": [],
+                },
+                candidates=[
+                    pytypes.SimpleNamespace(
+                        finish_reason="STOP",
+                        content=pytypes.SimpleNamespace(parts=[]),
+                    )
+                ],
+                usage_metadata=pytypes.SimpleNamespace(
+                    prompt_token_count=11,
+                    candidates_token_count=7,
+                ),
+            )
+
+    google_module = pytypes.ModuleType("google")
+    genai_module = pytypes.ModuleType("google.genai")
+    types_module = pytypes.ModuleType("google.genai.types")
+    genai_module.Client = _FakeClient
+    genai_module.types = types_module
+    google_module.genai = genai_module
+    types_module.Part = _FakePart
+    types_module.HttpOptions = _FakeHttpOptions
+    types_module.HttpRetryOptions = _FakeHttpRetryOptions
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+    monkeypatch.setitem(sys.modules, "google.genai.types", types_module)
+
+    image = llm._ImageRef(tmp_path / "diagram.png", "diagram.png", "image/png", b"PNG")
+
+    result = llm._call_gemini_native(
+        "google-key",
+        "gemini-3-flash-preview",
+        "Extract the graph.",
+        temperature=0,
+        reasoning_effort="low",
+        max_output_tokens=321,
+        deep_mode=True,
+        images=[image],
+    )
+
+    assert calls["client_kwargs"]["api_key"] == "google-key"
+    assert calls["client_kwargs"]["http_options"].kwargs["timeout"] > 0
+    assert calls["generate_kwargs"]["model"] == "gemini-3-flash-preview"
+    text_part = next(call[1] for call in part_calls if call[0] == "text")
+    assert calls["generate_kwargs"]["contents"] == [
+        {"text": text_part},
+        {"inline_data": {"data": b"PNG", "mime_type": "image/png"}},
+    ]
+    assert "diagram.png" in text_part
+    config = calls["generate_kwargs"]["config"]
+    assert config["system_instruction"].startswith("You are a graphify semantic extraction agent")
+    assert config["max_output_tokens"] == 321
+    assert config["temperature"] == 0
+    assert config["thinking_config"] == {"thinking_level": "low"}
+    assert config["response_mime_type"] == "application/json"
+    assert config["response_json_schema"] == llm._GEMINI_EXTRACTION_SCHEMA
+    assert result["nodes"][0]["id"] == "note_runner"
+    assert result["input_tokens"] == 11
+    assert result["output_tokens"] == 7
+    assert result["model"] == "gemini-3-flash-preview"
+    assert result["finish_reason"] == "stop"
+
+
+def test_gemini_finish_reason_maps_max_tokens_to_length():
+    assert llm._gemini_finish_reason("MAX_TOKENS") == "length"
+    assert llm._gemini_finish_reason("STOP") == "stop"
 
 
 def test_missing_gemini_key_names_both_supported_env_vars(monkeypatch):
@@ -145,7 +296,7 @@ def test_extract_files_direct_accepts_str_paths(tmp_path, monkeypatch):
     result = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 1, "output_tokens": 1}
 
     # str path must not raise AttributeError: 'str' object has no attribute 'suffix'
-    with patch("graphify.llm._call_openai_compat", return_value=result):
+    with patch("graphify.llm._call_gemini_native", return_value=result):
         assert llm.extract_files_direct([str(source)], backend="gemini", root=tmp_path) is result
 
 
@@ -158,7 +309,7 @@ def test_extract_corpus_parallel_accepts_str_and_mixed_paths(tmp_path, monkeypat
     f2.write_text("# B\n\nNode two.\n")
     result = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 1, "output_tokens": 1}
 
-    with patch("graphify.llm._call_openai_compat", return_value=result):
+    with patch("graphify.llm._call_gemini_native", return_value=result):
         # all-str, all-Path, and mixed must each pack + run without AttributeError
         for files in ([str(f1), str(f2)], [f1, f2], [str(f1), f2]):
             merged = llm.extract_corpus_parallel(
@@ -179,7 +330,7 @@ def test_corpus_parallel_oversized_markdown_does_not_crash_on_fileslice(tmp_path
     assert len(big.read_text()) > _FILE_CHAR_CAP  # guarantees slicing kicks in
     result = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 1, "output_tokens": 1}
 
-    with patch("graphify.llm._call_openai_compat", return_value=result):
+    with patch("graphify.llm._call_gemini_native", return_value=result):
         # both a str path and a FileSlice unit must flow through without TypeError
         merged = llm.extract_corpus_parallel(
             [str(big)], backend="gemini", root=tmp_path, max_concurrency=1
@@ -192,7 +343,7 @@ def test_str_path_entry_points_handle_edge_cases(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
     result = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 1, "output_tokens": 1}
 
-    with patch("graphify.llm._call_openai_compat", return_value=result):
+    with patch("graphify.llm._call_gemini_native", return_value=result):
         # empty list: no chunks, nothing to extract, no crash
         empty = llm.extract_corpus_parallel([], backend="gemini", root=tmp_path)
         assert empty["nodes"] == [] and empty["failed_chunks"] == 0

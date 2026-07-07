@@ -56,6 +56,8 @@ def _get_tokenizer():
 # Cached at import time. None if tiktoken is unavailable; consumers must handle.
 _TOKENIZER = _get_tokenizer()
 
+_GEMINI_OPENAI_COMPAT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
 BACKENDS: dict[str, dict] = {
     "claude": {
         # ANTHROPIC_BASE_URL points the backend at any Anthropic-compatible
@@ -93,8 +95,10 @@ BACKENDS: dict[str, dict] = {
     "gemini": {
         # GEMINI_BASE_URL points the backend at any OpenAI-compatible server for
         # Gemini models (LiteLLM, self-hosted proxy, ...). Falls back to Google's
-        # official OpenAI-compatible endpoint.
-        "base_url": os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+        # official OpenAI-compatible endpoint. When this value is the official
+        # default, extraction uses Google's native structured-output API; custom
+        # values stay on the OpenAI-compatible route.
+        "base_url": os.environ.get("GEMINI_BASE_URL", _GEMINI_OPENAI_COMPAT_BASE_URL),
         "default_model": "gemini-3-flash-preview",
         "env_keys": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         "model_env_key": "GRAPHIFY_GEMINI_MODEL",
@@ -419,6 +423,119 @@ Output exactly this schema:
 {"nodes":[{"id":"stem_entity","label":"Human Readable Name","file_type":"code|document|paper|image|rationale|concept","source_file":"relative/path","source_location":null,"source_url":null,"captured_at":null,"author":null,"contributor":null}],"edges":[{"source":"node_id","target":"node_id","relation":"calls|implements|references|cites|conceptually_related_to|shares_data_with|semantically_similar_to","confidence":"EXTRACTED|INFERRED|AMBIGUOUS","confidence_score":1.0,"source_file":"relative/path","source_location":null,"weight":1.0}],"hyperedges":[{"id":"snake_case_id","label":"Human Readable Label","nodes":["node_id1","node_id2","node_id3"],"relation":"participate_in|implement|form","confidence":"EXTRACTED|INFERRED","confidence_score":0.75,"source_file":"relative/path"}],"input_tokens":0,"output_tokens":0}
 """
 
+_STRING_OR_NULL = {"type": ["string", "null"]}
+
+_GEMINI_EXTRACTION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "nodes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "id": {"type": "string"},
+                    "label": {"type": "string"},
+                    "file_type": {
+                        "type": "string",
+                        "enum": ["code", "document", "paper", "image", "rationale", "concept"],
+                    },
+                    "source_file": {"type": "string"},
+                    "source_location": _STRING_OR_NULL,
+                    "source_url": _STRING_OR_NULL,
+                    "captured_at": _STRING_OR_NULL,
+                    "author": _STRING_OR_NULL,
+                    "contributor": _STRING_OR_NULL,
+                },
+                "required": [
+                    "id",
+                    "label",
+                    "file_type",
+                    "source_file",
+                    "source_location",
+                    "source_url",
+                    "captured_at",
+                    "author",
+                    "contributor",
+                ],
+            },
+        },
+        "edges": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "source": {"type": "string"},
+                    "target": {"type": "string"},
+                    "relation": {
+                        "type": "string",
+                        "enum": [
+                            "calls",
+                            "implements",
+                            "references",
+                            "cites",
+                            "conceptually_related_to",
+                            "shares_data_with",
+                            "semantically_similar_to",
+                        ],
+                    },
+                    "confidence": {
+                        "type": "string",
+                        "enum": ["EXTRACTED", "INFERRED", "AMBIGUOUS"],
+                    },
+                    "confidence_score": {"type": "number"},
+                    "source_file": {"type": "string"},
+                    "source_location": _STRING_OR_NULL,
+                    "weight": {"type": "number"},
+                },
+                "required": [
+                    "source",
+                    "target",
+                    "relation",
+                    "confidence",
+                    "confidence_score",
+                    "source_file",
+                    "source_location",
+                    "weight",
+                ],
+            },
+        },
+        "hyperedges": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "id": {"type": "string"},
+                    "label": {"type": "string"},
+                    "nodes": {"type": "array", "items": {"type": "string"}, "minItems": 3},
+                    "relation": {
+                        "type": "string",
+                        "enum": ["participate_in", "implement", "form"],
+                    },
+                    "confidence": {"type": "string", "enum": ["EXTRACTED", "INFERRED"]},
+                    "confidence_score": {"type": "number"},
+                    "source_file": {"type": "string"},
+                },
+                "required": [
+                    "id",
+                    "label",
+                    "nodes",
+                    "relation",
+                    "confidence",
+                    "confidence_score",
+                    "source_file",
+                ],
+            },
+        },
+        "input_tokens": {"type": "integer"},
+        "output_tokens": {"type": "integer"},
+    },
+    "required": ["nodes", "edges", "hyperedges", "input_tokens", "output_tokens"],
+}
+
 _DEEP_EXTRACTION_SUFFIX = """\
 
 DEEP_MODE: include additional INFERRED edges only for concrete architectural
@@ -506,9 +623,9 @@ def _read_files(units: "list[Path | FileSlice]", root: Path) -> str:
     for u in units:
         p = unit_path(u)
         try:
-            rel = str(p.relative_to(root))
+            rel = p.relative_to(root).as_posix()
         except ValueError:
-            rel = str(p)
+            rel = p.as_posix()
         try:
             if isinstance(u, FileSlice):
                 content = read_slice_text(u)
@@ -612,9 +729,9 @@ def _build_image_refs(image_files: list[Path], root: Path, *, read_bytes: bool =
     refs: list[_ImageRef] = []
     for p in image_files:
         try:
-            rel = str(p.relative_to(root))
+            rel = p.relative_to(root).as_posix()
         except ValueError:
-            rel = str(p)
+            rel = p.as_posix()
         media = _IMAGE_MEDIA_TYPES.get(p.suffix.lower(), "image/png")
         raw: bytes | None = None
         if read_bytes:
@@ -895,6 +1012,127 @@ def _backend_pkg_hint(pkg: str, extra: str) -> str:
         f"Install it with:  uv tool install \"graphifyy[{extra}]\" --force  "
         f"(uv tool), or  pip install {pkg}  (pip/venv install)."
     )
+
+
+def _same_base_url(a: str, b: str) -> bool:
+    return (a or "").rstrip("/") == (b or "").rstrip("/")
+
+
+def _gemini_uses_native_structured_output(base_url: str) -> bool:
+    """Use Google's native structured-output API for the official endpoint.
+
+    A custom ``GEMINI_BASE_URL`` means "route through an OpenAI-compatible
+    proxy/gateway"; those endpoints may not implement google-genai's native
+    request shape, so they stay on ``_call_openai_compat``.
+    """
+    return _same_base_url(base_url, _GEMINI_OPENAI_COMPAT_BASE_URL)
+
+
+def _gemini_content(user_message: str, refs: list[_ImageRef], types_module):
+    text = _with_image_notes(user_message, refs)
+    image_parts = [
+        types_module.Part.from_bytes(data=r.raw, mime_type=r.media_type)
+        for r in refs
+        if r.raw
+    ]
+    if not image_parts:
+        return text
+    return [types_module.Part.from_text(text=text), *image_parts]
+
+
+def _gemini_response_text(resp) -> str:
+    try:
+        return resp.text or ""
+    except Exception:
+        pass
+    chunks: list[str] = []
+    for candidate in getattr(resp, "candidates", None) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            text = getattr(part, "text", None)
+            if text:
+                chunks.append(text)
+    return "".join(chunks)
+
+
+def _gemini_finish_reason(reason) -> str:
+    value = getattr(reason, "name", reason) or ""
+    text = str(value).lower()
+    return "length" if "max_tokens" in text or "length" in text else "stop"
+
+
+def _call_gemini_native(
+    api_key: str,
+    model: str,
+    user_message: str,
+    temperature: float | None = 0,
+    reasoning_effort: str | None = None,
+    max_output_tokens: int = 8192,
+    *,
+    deep_mode: bool = False,
+    images: list[_ImageRef] | None = None,
+) -> dict:
+    """Call Google's Gemini API with a native structured-output schema."""
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise ImportError(_backend_pkg_hint("google-genai", "gemini")) from exc
+
+    timeout_ms = int(_resolve_api_timeout() * 1000)
+    try:
+        http_options = types.HttpOptions(
+            timeout=timeout_ms,
+            retry_options=types.HttpRetryOptions(
+                attempts=_resolve_max_retries(),
+                http_status_codes=[408, 429, 500, 502, 503, 504],
+            ),
+        )
+    except Exception:
+        http_options = {"timeout": timeout_ms}
+    client = genai.Client(api_key=api_key, http_options=http_options)
+
+    config: dict = {
+        "system_instruction": _extraction_system(deep=deep_mode),
+        "max_output_tokens": max_output_tokens,
+        "response_mime_type": "application/json",
+        "response_json_schema": _GEMINI_EXTRACTION_SCHEMA,
+    }
+    if temperature is not None:
+        config["temperature"] = temperature
+    if reasoning_effort:
+        config["thinking_config"] = {"thinking_level": reasoning_effort}
+
+    resp = client.models.generate_content(
+        model=model,
+        contents=_gemini_content(user_message, images or [], types),
+        config=config,
+    )
+    if not getattr(resp, "candidates", None):
+        raise ValueError("Gemini returned empty or filtered response")
+
+    raw_content = _gemini_response_text(resp)
+    parsed = getattr(resp, "parsed", None)
+    if isinstance(parsed, dict):
+        result = parsed
+        if not raw_content:
+            raw_content = json.dumps(parsed)
+    else:
+        result = _parse_llm_json(raw_content or "{}")
+
+    usage = getattr(resp, "usage_metadata", None)
+    result["input_tokens"] = int(getattr(usage, "prompt_token_count", 0) or 0)
+    result["output_tokens"] = int(getattr(usage, "candidates_token_count", 0) or 0)
+    result["model"] = model
+    result["finish_reason"] = _gemini_finish_reason(resp.candidates[0].finish_reason)
+    if _response_is_hollow(raw_content, result) and result["finish_reason"] != "length":
+        print(
+            "[graphify] gemini returned a hollow response; treating as "
+            "truncation so adaptive retry can bisect the chunk.",
+            file=sys.stderr,
+        )
+        result["finish_reason"] = "length"
+    return result
 
 
 def _call_openai_compat(
@@ -1390,7 +1628,9 @@ def extract_files_direct(
     image_refs = _build_image_refs(image_files, root, read_bytes=read_bytes) if image_files else []
     if image_refs and not vision:
         image_refs = _strip_pixels(image_refs)
-    max_out = _resolve_max_tokens(cfg.get("max_tokens", 8192))
+    max_out = _resolve_max_tokens(
+        cfg.get("max_completion_tokens") or cfg.get("max_tokens", 8192)
+    )
 
     if backend == "claude":
         return _call_claude(key, mdl, user_msg, max_tokens=max_out, deep_mode=deep_mode, images=image_refs)
@@ -1398,6 +1638,17 @@ def extract_files_direct(
         return _call_claude_cli(user_msg, max_tokens=max_out, deep_mode=deep_mode, images=image_refs)
     if backend == "bedrock":
         return _call_bedrock(mdl, user_msg, max_tokens=max_out, deep_mode=deep_mode, images=image_refs)
+    if backend == "gemini" and _gemini_uses_native_structured_output(cfg.get("base_url", "")):
+        return _call_gemini_native(
+            key,
+            mdl,
+            user_msg,
+            temperature=_resolve_temperature(cfg.get("temperature", 0), mdl),
+            reasoning_effort=cfg.get("reasoning_effort"),
+            max_output_tokens=max_out,
+            deep_mode=deep_mode,
+            images=image_refs,
+        )
     if backend == "azure":
         endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
         if not endpoint:
@@ -1421,13 +1672,11 @@ def extract_files_direct(
         user_msg,
         temperature=_resolve_temperature(cfg.get("temperature", 0), mdl),
         reasoning_effort=cfg.get("reasoning_effort"),
-        # Honour max_completion_tokens (gemini) or the older max_tokens key
-        # (ollama/deepseek/kimi/openai) -- most openai-compat configs define the
-        # latter, so reading only max_completion_tokens silently capped their
+        # Honour max_completion_tokens (gemini/proxies) or the older max_tokens
+        # key (ollama/deepseek/kimi/openai) -- most openai-compat configs define
+        # the latter, so reading only max_completion_tokens silently capped their
         # output at the 8192 fallback and truncated deep-mode JSON (#1365).
-        max_completion_tokens=_resolve_max_tokens(
-            cfg.get("max_completion_tokens") or cfg.get("max_tokens", 8192)
-        ),
+        max_completion_tokens=max_out,
         backend=backend,
         deep_mode=deep_mode,
         images=image_refs,
