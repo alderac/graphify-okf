@@ -7,8 +7,10 @@ from graphify.audit import (
     backfill_single_file_source,
     find_node_id_collisions,
     find_source_attribution_violations,
+    namespace_semantic_node_ids,
     new_extraction_audit,
     record_cache_status,
+    record_collisions,
     strict_failures,
     write_audit,
 )
@@ -99,6 +101,88 @@ def test_collision_report_persists_old_and_new_sources():
             "count": 3,
         }
     ]
+
+
+def test_namespace_semantic_node_ids_uses_source_path_and_content_hash(tmp_path):
+    a = tmp_path / "module-a" / "README.md"
+    b = tmp_path / "module-b" / "README.md"
+    a.parent.mkdir()
+    b.parent.mkdir()
+    a.write_text("# Booking\n", encoding="utf-8")
+    b.write_text("# Booking\n", encoding="utf-8")
+    extraction = {
+        "nodes": [
+            {"id": "readme_booking_service", "label": "Booking Service", "file_type": "concept", "source_file": str(a)},
+            {"id": "readme_booking_service", "label": "Booking Service", "file_type": "concept", "source_file": str(b)},
+        ],
+        "edges": [
+            {
+                "source": "readme_booking_service",
+                "target": "readme_booking_service",
+                "relation": "references",
+                "confidence": "EXTRACTED",
+                "source_file": str(a),
+            }
+        ],
+        "hyperedges": [],
+    }
+
+    remap, collisions = namespace_semantic_node_ids(extraction, tmp_path)
+
+    ids = [n["id"] for n in extraction["nodes"]]
+    assert len(set(ids)) == 2
+    assert all("readme_booking_service" in node_id for node_id in ids)
+    assert all("module_" in node_id for node_id in ids)
+    assert remap["readme_booking_service"] in ids
+    assert collisions[0]["id"] == "readme_booking_service"
+    assert any(e["relation"] == "semantically_similar_to" for e in extraction["edges"])
+
+
+def test_namespace_semantic_node_ids_is_idempotent_for_cached_results(tmp_path):
+    source = tmp_path / "docs" / "README.md"
+    source.parent.mkdir()
+    source.write_text("# Cached\n", encoding="utf-8")
+    extraction = {
+        "nodes": [
+            {"id": "readme_cached_concept", "label": "Cached Concept", "source_file": str(source)},
+        ],
+        "edges": [
+            {
+                "source": "readme_cached_concept",
+                "target": "readme_cached_concept",
+                "relation": "references",
+                "source_file": str(source),
+            }
+        ],
+        "hyperedges": [{"id": "h", "nodes": ["readme_cached_concept"], "source_file": str(source)}],
+    }
+
+    namespace_semantic_node_ids(extraction, tmp_path)
+    once = json.loads(json.dumps(extraction))
+    namespace_semantic_node_ids(extraction, tmp_path)
+
+    assert extraction == once
+
+
+def test_record_collisions_preserves_pre_namespace_reports(tmp_path):
+    audit = new_extraction_audit(tmp_path, tmp_path, mode="seed", strict=True)
+    nodes = [
+        {"id": "docs_a_readme_12345678_booking", "source_file": "docs/a/README.md"},
+        {"id": "docs_b_readme_87654321_booking", "source_file": "docs/b/README.md"},
+    ]
+    pre_namespace = [
+        {
+            "id": "readme_booking",
+            "sources": ["docs/a/README.md", "docs/b/README.md"],
+            "labels": ["Booking"],
+            "count": 2,
+        }
+    ]
+
+    record_collisions(audit, nodes, pre_namespace)
+
+    assert audit["collisions"] == pre_namespace
+    assert any(f["code"] == "node_id_collision" for f in strict_failures(audit))
 
 
 def test_write_audit_is_machine_readable_json(tmp_path):

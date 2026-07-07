@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -196,6 +197,127 @@ def find_node_id_collisions(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]
     return reports
 
 
+def _source_hash(source_file: str, root: Path) -> str:
+    try:
+        from graphify.cache import file_hash
+
+        p = Path(source_file)
+        if not p.is_absolute():
+            p = root / p
+        if p.is_file():
+            return file_hash(p, root)[:8]
+    except OSError:
+        pass
+    return hashlib.sha256(str(source_file).encode("utf-8", errors="replace")).hexdigest()[:8]
+
+
+def _source_stem(source_file: str, root: Path) -> str:
+    from graphify.extractors.base import _file_stem
+
+    p = Path(source_file)
+    try:
+        rel = p.resolve().relative_to(root.resolve()) if p.is_absolute() else p
+    except (ValueError, OSError):
+        rel = p
+    return _file_stem(rel)
+
+
+def namespace_semantic_node_ids(
+    extraction: dict[str, Any],
+    root: Path,
+) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    """Namespace semantic node IDs by source path and content hash.
+
+    LLM output often names same-label concepts with the same ID across files.
+    Before graph build, make those IDs source-specific so NetworkX cannot
+    silently merge the second node into the first. Repeated calls are safe for
+    cached results that were already written after namespacing.
+    """
+    from graphify.ids import make_id, normalize_id
+
+    nodes = [n for n in extraction.get("nodes", []) or [] if isinstance(n, dict)]
+    collisions = find_node_id_collisions(nodes)
+    remap_by_source: dict[tuple[str, str], str] = {}
+    first_by_old_id: dict[str, str] = {}
+
+    for node in nodes:
+        old_id = str(node.get("id") or "")
+        source_file = str(node.get("source_file") or "")
+        if not old_id or not source_file:
+            continue
+        stem = make_id(_source_stem(source_file, root))
+        digest = _source_hash(source_file, root)
+        norm_old = normalize_id(old_id)
+        prefix = make_id(stem, digest)
+        if norm_old == prefix or norm_old.startswith(prefix + "_"):
+            new_id = norm_old
+        else:
+            entity = norm_old
+            if norm_old == stem:
+                entity = ""
+            elif norm_old.startswith(stem + "_"):
+                entity = norm_old[len(stem) + 1:]
+            new_id = make_id(stem, digest, entity)
+        remap_by_source[(old_id, source_file)] = new_id
+        first_by_old_id.setdefault(old_id, new_id)
+        node["id"] = new_id
+
+    def _remap_endpoint(value: Any, source_file: str) -> Any:
+        if not isinstance(value, str):
+            return value
+        return remap_by_source.get((value, source_file)) or first_by_old_id.get(value, value)
+
+    for edge in extraction.get("edges", []) or []:
+        if not isinstance(edge, dict):
+            continue
+        source_file = str(edge.get("source_file") or "")
+        edge["source"] = _remap_endpoint(edge.get("source"), source_file)
+        edge["target"] = _remap_endpoint(edge.get("target"), source_file)
+
+    for edge in extraction.get("links", []) or []:
+        if not isinstance(edge, dict):
+            continue
+        source_file = str(edge.get("source_file") or "")
+        edge["source"] = _remap_endpoint(edge.get("source"), source_file)
+        edge["target"] = _remap_endpoint(edge.get("target"), source_file)
+
+    for hyperedge in extraction.get("hyperedges", []) or []:
+        if not isinstance(hyperedge, dict) or not isinstance(hyperedge.get("nodes"), list):
+            continue
+        source_file = str(hyperedge.get("source_file") or "")
+        hyperedge["nodes"] = [_remap_endpoint(node_id, source_file) for node_id in hyperedge["nodes"]]
+
+    for collision in collisions:
+        new_ids = [
+            remap_by_source[(collision["id"], source)]
+            for source in collision["sources"]
+            if (collision["id"], source) in remap_by_source
+        ]
+        for left, right in zip(new_ids, new_ids[1:]):
+            source_file = next(
+                source
+                for source in collision["sources"]
+                if remap_by_source.get((collision["id"], source)) == left
+            )
+            edge = {
+                "source": left,
+                "target": right,
+                "relation": "semantically_similar_to",
+                "confidence": "AMBIGUOUS",
+                "confidence_score": 0.5,
+                "source_file": source_file,
+                "weight": 0.2,
+                "context": f"pre-namespace semantic id collision on {collision['id']}",
+            }
+            if edge not in extraction.setdefault("edges", []):
+                extraction["edges"].append(edge)
+
+    flat_remap: dict[str, str] = {}
+    for (old_id, _source), new_id in remap_by_source.items():
+        flat_remap[old_id] = new_id
+    return flat_remap, collisions
+
+
 def record_source_attribution(audit: dict[str, Any], extraction: dict[str, Any]) -> None:
     violations = find_source_attribution_violations(extraction)
     audit["source_attribution_violations"] = violations
@@ -208,8 +330,12 @@ def record_source_attribution(audit: dict[str, Any], extraction: dict[str, Any])
         )
 
 
-def record_collisions(audit: dict[str, Any], nodes: list[dict[str, Any]]) -> None:
-    collisions = find_node_id_collisions(nodes)
+def record_collisions(
+    audit: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    extra_collisions: list[dict[str, Any]] | None = None,
+) -> None:
+    collisions = [*(extra_collisions or []), *find_node_id_collisions(nodes)]
     audit["collisions"] = collisions
     for collision in collisions:
         add_warning(

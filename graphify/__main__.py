@@ -4516,6 +4516,7 @@ def main() -> None:
         from graphify.audit import (
             add_warning as _audit_warning,
             backfill_single_file_source as _backfill_single_file_source,
+            namespace_semantic_node_ids as _namespace_semantic_node_ids,
             new_extraction_audit as _new_audit,
             record_cache_status as _audit_cache,
             record_collisions as _audit_collisions,
@@ -4715,6 +4716,7 @@ def main() -> None:
         }
         sem_cache_hits = 0
         sem_cache_misses = 0
+        semantic_namespace_collisions: list[dict] = []
         if semantic_files:
             sem_paths_str = [str(p) for p in semantic_files]
             cached_nodes, cached_edges, cached_hyperedges, uncached_paths = (
@@ -4727,6 +4729,8 @@ def main() -> None:
             sem_result["nodes"].extend(cached_nodes)
             sem_result["edges"].extend(cached_edges)
             sem_result["hyperedges"].extend(cached_hyperedges)
+            _cached_remap, _cached_collisions = _namespace_semantic_node_ids(sem_result, target)
+            semantic_namespace_collisions.extend(_cached_collisions)
             if sem_cache_hits:
                 print(f"[graphify extract] semantic cache: {sem_cache_hits} hit / {sem_cache_misses} miss")
             if strict_mode and uncached_paths:
@@ -4812,6 +4816,8 @@ def main() -> None:
 
                 if len(uncached_paths) == 1:
                     _backfill_single_file_source(fresh, str(uncached_paths[0]))
+                _fresh_remap, _fresh_collisions = _namespace_semantic_node_ids(fresh, target)
+                semantic_namespace_collisions.extend(_fresh_collisions)
 
                 # on_chunk_done only fires after a chunk succeeds. If fresh
                 # semantic extraction was requested and no chunks completed,
@@ -4921,7 +4927,7 @@ def main() -> None:
         }
         audit["extraction"]["input_tokens"] = merged.get("input_tokens", 0)
         audit["extraction"]["output_tokens"] = merged.get("output_tokens", 0)
-        _audit_collisions(audit, list(merged.get("nodes", [])))
+        _audit_collisions(audit, list(merged.get("nodes", [])), semantic_namespace_collisions)
         _audit_source_attribution(audit, merged)
         if strict_mode:
             failures = _audit_strict_failures(audit)
