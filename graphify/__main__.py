@@ -24,6 +24,35 @@ except Exception:
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 
 
+def _semantic_manifest_key(value: str | Path, root: Path) -> str:
+    p = Path(str(value))
+    if not p.is_absolute():
+        p = Path(root) / p
+    return os.path.normcase(os.path.abspath(str(p)))
+
+
+def _filter_manifest_files_for_semantic_outputs(
+    files_by_type: dict[str, list[str]],
+    sem_result: dict,
+    root: Path,
+) -> dict[str, list[str]]:
+    sem_extracted: set[str] = set()
+    for bucket in ("nodes", "edges", "links", "hyperedges"):
+        for item in sem_result.get(bucket, []) or []:
+            if isinstance(item, dict) and item.get("source_file"):
+                sem_extracted.add(_semantic_manifest_key(item["source_file"], root))
+
+    sem_types = {"document", "paper", "image"}
+    return {
+        ftype: [
+            f
+            for f in flist
+            if ftype not in sem_types or _semantic_manifest_key(f, root) in sem_extracted
+        ]
+        for ftype, flist in files_by_type.items()
+    }
+
+
 @functools.lru_cache(maxsize=None)
 def _always_on(basename: str) -> str:
     """Read a packaged always-on instruction block from graphify/always_on/.
@@ -2260,10 +2289,19 @@ def _cmd_seed_hydrate_smoke() -> None:
 
     ignored = shutil.ignore_patterns(
         ".git",
+        ".agent/local",
+        "node_modules",
         ".venv",
+        "venv",
         "__pycache__",
         ".pytest_cache",
         ".ruff_cache",
+        ".next",
+        ".turbo",
+        ".vite",
+        "coverage",
+        "dist",
+        "build",
     )
     temp_parent = Path(tempfile.mkdtemp(prefix="graphify-hydrate-"))
     temp_project = temp_parent / source.name
@@ -2320,6 +2358,9 @@ def _cmd_seed_hydrate_smoke() -> None:
             "output_tokens": output_tokens,
             "strict_failures": failures,
         }
+        if not ok:
+            payload["stdout_tail"] = (proc.stdout or "")[-4000:]
+            payload["stderr_tail"] = (proc.stderr or "")[-4000:]
         if json_out:
             print(json.dumps(payload, indent=2))
         else:
@@ -5091,17 +5132,11 @@ def main() -> None:
         # that actually produced output (cache hit or fresh extraction). Files
         # whose chunk failed have no source_file entry in sem_result — leaving
         # their semantic_hash empty so detect_incremental re-queues them (#933).
-        _sem_extracted: set[str] = {
-            n.get("source_file", "") for n in sem_result.get("nodes", [])
-        } | {
-            e.get("source_file", "") for e in sem_result.get("edges", [])
-        }
-        _sem_extracted.discard("")
-        _sem_types = {"document", "paper", "image"}
-        _manifest_files = {
-            ftype: [f for f in flist if ftype not in _sem_types or f in _sem_extracted]
-            for ftype, flist in files_by_type.items()
-        }
+        _manifest_files = _filter_manifest_files_for_semantic_outputs(
+            files_by_type,
+            sem_result,
+            target,
+        )
 
         if no_cluster:
             # --no-cluster: dump the raw merged extraction as graph.json.

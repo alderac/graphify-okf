@@ -335,9 +335,18 @@ def record_collisions(
     nodes: list[dict[str, Any]],
     extra_collisions: list[dict[str, Any]] | None = None,
 ) -> None:
-    collisions = [*(extra_collisions or []), *find_node_id_collisions(nodes)]
+    repaired_collisions = [dict(collision, repaired=True) for collision in (extra_collisions or [])]
+    unresolved_collisions = find_node_id_collisions(nodes)
+    collisions = [*repaired_collisions, *unresolved_collisions]
     audit["collisions"] = collisions
-    for collision in collisions:
+    for collision in repaired_collisions:
+        add_warning(
+            audit,
+            "node_id_collision_repaired",
+            f"node id {collision['id']} was namespaced across multiple source files",
+            details=collision,
+        )
+    for collision in unresolved_collisions:
         add_warning(
             audit,
             "node_id_collision",

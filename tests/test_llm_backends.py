@@ -414,6 +414,50 @@ def test_adaptive_retry_splits_on_context_exceeded(tmp_path):
     assert calls["n"] == 3  # 1 failure + 2 halves
 
 
+def test_adaptive_retry_splits_on_invalid_json(tmp_path):
+    files = [tmp_path / f"f{i}.md" for i in range(4)]
+    for f in files:
+        f.write_text("hello")
+
+    calls = []
+
+    def fake_extract(chunk, *_, **__):
+        calls.append(len(chunk))
+        if len(chunk) == 4:
+            raise ValueError("invalid_json: could not parse LLM JSON response")
+        return _ok(nodes=[{"id": f.stem} for f in chunk])
+
+    with patch("graphify.llm.extract_files_direct", side_effect=fake_extract):
+        result = llm._extract_with_adaptive_retry(
+            files, backend="gemini", api_key="k", model="gemini-2.5-flash-lite", root=tmp_path, max_depth=3
+        )
+
+    assert len(result["nodes"]) == 4
+    assert calls == [4, 2, 2]
+
+
+def test_adaptive_retry_slices_single_splittable_file_on_invalid_json(tmp_path):
+    f = tmp_path / "doc.md"
+    f.write_text("# One\n\nalpha\n\n# Two\n\nbeta\n")
+
+    calls = []
+
+    def fake_extract(chunk, *_, **__):
+        calls.append([type(unit).__name__ for unit in chunk])
+        if len(calls) == 1:
+            raise ValueError("invalid_json: could not parse LLM JSON response")
+        return _ok(nodes=[{"id": f"slice_{chunk[0].start}_{chunk[0].end}"}])
+
+    with patch("graphify.llm.extract_files_direct", side_effect=fake_extract):
+        result = llm._extract_with_adaptive_retry(
+            [f], backend="gemini", api_key="k", model="gemini-2.5-flash-lite", root=tmp_path, max_depth=3
+        )
+
+    assert len(result["nodes"]) == 2
+    assert calls[0] == [type(f).__name__]
+    assert calls[1:] == [["FileSlice"], ["FileSlice"]]
+
+
 def test_adaptive_retry_gives_up_on_single_file_overflow(tmp_path):
     f = tmp_path / "huge.md"
     f.write_text("x")

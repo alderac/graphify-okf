@@ -164,7 +164,7 @@ def test_namespace_semantic_node_ids_is_idempotent_for_cached_results(tmp_path):
     assert extraction == once
 
 
-def test_record_collisions_preserves_pre_namespace_reports(tmp_path):
+def test_record_collisions_preserves_repaired_pre_namespace_reports(tmp_path):
     audit = new_extraction_audit(tmp_path, tmp_path, mode="seed", strict=True)
     nodes = [
         {"id": "docs_a_readme_12345678_booking", "source_file": "docs/a/README.md"},
@@ -181,7 +181,21 @@ def test_record_collisions_preserves_pre_namespace_reports(tmp_path):
 
     record_collisions(audit, nodes, pre_namespace)
 
-    assert audit["collisions"] == pre_namespace
+    assert audit["collisions"] == [dict(pre_namespace[0], repaired=True)]
+    assert any(w["code"] == "node_id_collision_repaired" for w in audit["warnings"])
+    assert strict_failures(audit) == []
+
+
+def test_record_collisions_fails_unresolved_node_id_collisions(tmp_path):
+    audit = new_extraction_audit(tmp_path, tmp_path, mode="seed", strict=True)
+    nodes = [
+        {"id": "readme_booking", "source_file": "docs/a/README.md"},
+        {"id": "readme_booking", "source_file": "docs/b/README.md"},
+    ]
+
+    record_collisions(audit, nodes)
+
+    assert any(c["id"] == "readme_booking" for c in audit["collisions"])
     assert any(f["code"] == "node_id_collision" for f in strict_failures(audit))
 
 

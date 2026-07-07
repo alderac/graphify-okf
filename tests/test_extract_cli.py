@@ -105,7 +105,7 @@ def test_extract_seed_fails_on_semantic_cache_miss(monkeypatch, tmp_path, capsys
     assert "strict/seed mode failed" in capsys.readouterr().err
 
 
-def test_extract_strict_cache_hit_preserves_node_collision_audit(
+def test_extract_strict_cache_hit_allows_repaired_node_collision_audit(
     monkeypatch, tmp_path, capsys
 ):
     corpus = tmp_path / "corpus"
@@ -174,16 +174,20 @@ def test_extract_strict_cache_hit_preserves_node_collision_audit(
     with pytest.raises(SystemExit) as second:
         mainmod.main()
 
-    assert second.value.code == 1
+    assert second.value.code == 0
     import json
 
     audit = json.loads(
         (out_dir / "graphify-out" / "extraction-audit.json").read_text(encoding="utf-8")
     )
     assert audit["cache"]["semantic_cache_hits"] == 2
-    assert any(collision["id"] == "shared_concept" for collision in audit["collisions"])
-    assert any(failure["code"] == "node_id_collision" for failure in audit["strict_failures"])
-    assert "strict/seed mode failed" in capsys.readouterr().err
+    assert any(
+        collision["id"] == "shared_concept" and collision.get("repaired") is True
+        for collision in audit["collisions"]
+    )
+    assert any(warning["code"] == "node_id_collision_repaired" for warning in audit["warnings"])
+    assert not any(failure["code"] == "node_id_collision" for failure in audit["strict_failures"])
+    assert "strict/seed mode failed" not in capsys.readouterr().err
 
 
 def test_extract_postgres_failure_writes_audit_before_exit(

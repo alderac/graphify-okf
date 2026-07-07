@@ -20,6 +20,7 @@ from graphify.file_slice import (
     FileSlice,
     bisect_slice,
     expand_oversized_files,
+    is_splittable_text,
     read_slice_text,
     unit_path,
 )
@@ -1146,11 +1147,21 @@ def _call_gemini_native(
     if reasoning_effort:
         config["thinking_config"] = {"thinking_level": reasoning_effort}
 
-    resp = client.models.generate_content(
-        model=model,
-        contents=_gemini_content(user_message, images or [], types),
-        config=config,
-    )
+    try:
+        resp = client.models.generate_content(
+            model=model,
+            contents=_gemini_content(user_message, images or [], types),
+            config=config,
+        )
+    except Exception as exc:
+        if "Thinking level is not supported" not in str(exc) or "thinking_config" not in config:
+            raise
+        config.pop("thinking_config", None)
+        resp = client.models.generate_content(
+            model=model,
+            contents=_gemini_content(user_message, images or [], types),
+            config=config,
+        )
     if not getattr(resp, "candidates", None):
         raise ValueError("Gemini returned empty or filtered response")
 
@@ -1856,6 +1867,10 @@ def _looks_like_context_exceeded(exc: BaseException) -> bool:
     return any(marker in msg for marker in _CONTEXT_EXCEEDED_MARKERS)
 
 
+def _looks_like_invalid_json(exc: BaseException) -> bool:
+    return str(exc).startswith("invalid_json:")
+
+
 def _extract_with_adaptive_retry(
     chunk: list[Path],
     backend: str,
@@ -1869,9 +1884,9 @@ def _extract_with_adaptive_retry(
     strict: bool = False,
     on_warning: Callable | None = None,
 ) -> dict:
-    """Extract a chunk; if the response is truncated (`finish_reason="length"`)
-    or the API rejects the prompt as too large for the model's context window,
-    split the chunk in half and recurse.
+    """Extract a chunk; if the response is truncated (`finish_reason="length"`),
+    malformed (`invalid_json`), or the API rejects the prompt as too large for
+    the model's context window, split the chunk in half and recurse.
 
     Three signals drive the retry, all funnelled through the same code:
 
@@ -1886,6 +1901,10 @@ def _extract_with_adaptive_retry(
       half is the same recovery as for the `length` case and works for the
       same reason.
 
+    - `invalid_json` parser failures — even native structured-output backends
+      can return malformed or incomplete JSON for a large chunk. Treat it like
+      truncation: discard the unusable response and retry smaller chunks.
+
     - hollow successful responses — the model returned HTTP 200 with empty,
       null, or valid-but-empty content (typical of a local Ollama under load).
       `_call_openai_compat` re-labels these as `finish_reason="length"` so they
@@ -1898,7 +1917,8 @@ def _extract_with_adaptive_retry(
     warning rather than infinite-loop.
 
     A single-file chunk that overflows is recoverable only when it's a slice of
-    a splittable document: the slice is bisected and retried (#1369). A whole
+    a splittable document, or a whole splittable text file that can be turned
+    into a full-file slice: the slice is bisected and retried (#1369). A whole
     non-splittable file (e.g. one huge code file) can't be made smaller than
     itself, so we return what we got and warn.
     """
@@ -1946,51 +1966,88 @@ def _extract_with_adaptive_retry(
             "finish_reason": "stop",
         }
 
-    def _split_lone_slice() -> "tuple[FileSlice, FileSlice] | None":
-        # When a single-unit chunk is a slice, bisect the slice so we can retry
-        # on a smaller range rather than give up (#1369).
-        if len(chunk) == 1 and isinstance(chunk[0], FileSlice) and _depth < max_depth:
-            return bisect_slice(chunk[0])
-        return None
+    def _split_lone_unit() -> "tuple[FileSlice, FileSlice] | None":
+        # When a single-unit chunk is splittable text, bisect it so we can
+        # retry on a smaller range rather than give up (#1369).
+        if len(chunk) != 1 or _depth >= max_depth:
+            return None
+        unit = chunk[0]
+        if isinstance(unit, FileSlice):
+            return bisect_slice(unit)
+        if not isinstance(unit, Path) or not is_splittable_text(unit):
+            return None
+        try:
+            text_len = len(unit.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            return None
+        if text_len <= 1:
+            return None
+        return bisect_slice(FileSlice(unit, 0, text_len, 0, 1))
+
+    def _lone_unit_label() -> str:
+        if len(chunk) == 1 and isinstance(chunk[0], FileSlice):
+            return "slice"
+        return "single-file chunk"
+
+    def _lone_unit_split_source() -> str:
+        label = _lone_unit_label()
+        return f"{label} of {unit_path(chunk[0])}" if label == "slice" else f"{label} {unit_path(chunk[0])}"
+
+    def _lone_unit_warning_subject() -> str:
+        label = _lone_unit_label()
+        return f"{label} {unit_path(chunk[0])}"
 
     try:
         result = extract_files_direct(
             chunk, backend=backend, api_key=api_key, model=model, root=root, deep_mode=deep_mode
         )
-    except Exception as exc:  # noqa: BLE001 — re-raise unless it's a known context overflow
-        if not _looks_like_context_exceeded(exc):
+    except Exception as exc:  # noqa: BLE001 — re-raise unless a smaller chunk can plausibly recover
+        context_exceeded = _looks_like_context_exceeded(exc)
+        invalid_json = _looks_like_invalid_json(exc)
+        if not (context_exceeded or invalid_json):
             raise
+        warning_code = "invalid_json" if invalid_json else "chunk_failed"
+        trigger = "returned invalid JSON" if invalid_json else "exceeded context"
         if len(chunk) <= 1:
-            halves = _split_lone_slice()
+            halves = _split_lone_unit()
             if halves is not None:
                 print(
-                    f"[graphify] slice of {unit_path(chunk[0])} exceeded context at "
-                    f"depth {_depth}; splitting the slice and retrying",
+                    f"[graphify] {_lone_unit_split_source()} {trigger} at depth "
+                    f"{_depth}; splitting the slice and retrying",
                     file=sys.stderr,
                 )
                 return _merge_two([halves[0]], [halves[1]])
+            if invalid_json:
+                msg = f"{_lone_unit_warning_subject()} returned invalid JSON and cannot be split further"
+            else:
+                msg = f"{_lone_unit_warning_subject()} exceeds model context and cannot be split further"
             _emit_warning(
                 on_warning,
-                "chunk_failed",
-                f"single-file chunk {unit_path(chunk[0])} exceeds model context and cannot be split further",
+                warning_code,
+                msg,
                 source_file=str(unit_path(chunk[0])),
             )
             if strict:
                 raise StrictExtractionError(str(exc)) from exc
             print(
-                f"[graphify] single-file chunk {unit_path(chunk[0])} exceeds model context "
-                f"and cannot be split further: {exc}",
+                f"[graphify] {msg}: {exc}",
                 file=sys.stderr,
             )
             return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0, "model": model, "finish_reason": "stop"}
         if _depth >= max_depth:
-            msg = (
-                f"chunk of {len(chunk)} still overflows context at recursion depth {_depth} "
-                f"(max {max_depth})"
-            )
+            if invalid_json:
+                msg = (
+                    f"chunk of {len(chunk)} still returned invalid JSON at recursion depth {_depth} "
+                    f"(max {max_depth})"
+                )
+            else:
+                msg = (
+                    f"chunk of {len(chunk)} still overflows context at recursion depth {_depth} "
+                    f"(max {max_depth})"
+                )
             _emit_warning(
                 on_warning,
-                "chunk_failed",
+                warning_code,
                 msg,
                 chunk_size=len(chunk),
                 depth=_depth,
@@ -2004,7 +2061,7 @@ def _extract_with_adaptive_retry(
             )
             return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0, "model": model, "finish_reason": "stop"}
         print(
-            f"[graphify] chunk of {len(chunk)} exceeded context at depth "
+            f"[graphify] chunk of {len(chunk)} {trigger} at depth "
             f"{_depth} ({type(exc).__name__}); splitting in half and retrying",
             file=sys.stderr,
         )
@@ -2048,15 +2105,15 @@ def _extract_with_adaptive_retry(
         return result
 
     if len(chunk) <= 1:
-        halves = _split_lone_slice()
+        halves = _split_lone_unit()
         if halves is not None:
             print(
-                f"[graphify] slice of {unit_path(chunk[0])} truncated at depth {_depth}; "
+                f"[graphify] {_lone_unit_split_source()} truncated at depth {_depth}; "
                 f"splitting the slice and retrying",
                 file=sys.stderr,
             )
             return _merge_two([halves[0]], [halves[1]], result.get("warnings", []))
-        msg = f"single-file chunk {unit_path(chunk[0])} truncated at max_completion_tokens"
+        msg = f"{_lone_unit_warning_subject()} truncated at max_completion_tokens"
         _emit_warning(on_warning, "partial_truncation", msg, source_file=str(unit_path(chunk[0])))
         if strict:
             raise StrictExtractionError(msg)
