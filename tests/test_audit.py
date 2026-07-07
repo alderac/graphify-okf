@@ -52,6 +52,19 @@ def test_source_attribution_finds_nodes_edges_links_and_hyperedges():
     assert {"kind": "hyperedge", "index": 0, "id": "h"} in violations
 
 
+def test_source_attribution_checks_edges_and_links_when_both_present():
+    extraction = {
+        "nodes": [{"id": "a", "label": "A", "source_file": "a.md"}],
+        "edges": [{"source": "a", "target": "b"}],
+        "links": [{"source": "a", "target": "c"}],
+    }
+
+    violations = find_source_attribution_violations(extraction)
+
+    assert {"kind": "edge", "index": 0, "id": "a->b"} in violations
+    assert {"kind": "edge", "index": 0, "id": "a->c"} in violations
+
+
 def test_collision_report_persists_old_and_new_sources():
     nodes = [
         {"id": "readme_booking_service", "source_file": "module-a/README.md", "label": "Booking Service"},

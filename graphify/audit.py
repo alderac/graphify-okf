@@ -159,12 +159,13 @@ def find_source_attribution_violations(extraction: dict[str, Any]) -> list[dict[
         if isinstance(node, dict) and not node.get("source_file"):
             violations.append({"kind": "node", "index": i, "id": str(node.get("id", "?"))})
 
-    edge_list = extraction.get("edges") if "edges" in extraction else extraction.get("links")
-    for i, edge in enumerate(edge_list or []):
-        if isinstance(edge, dict) and not edge.get("source_file"):
-            src = edge.get("source", edge.get("from", "?"))
-            tgt = edge.get("target", edge.get("to", "?"))
-            violations.append({"kind": "edge", "index": i, "id": f"{src}->{tgt}"})
+    for edge_key in ("edges", "links"):
+        edge_list = extraction.get(edge_key)
+        for i, edge in enumerate(edge_list or []):
+            if isinstance(edge, dict) and not edge.get("source_file"):
+                src = edge.get("source", edge.get("from", "?"))
+                tgt = edge.get("target", edge.get("to", "?"))
+                violations.append({"kind": "edge", "index": i, "id": f"{src}->{tgt}"})
 
     for i, hyperedge in enumerate(extraction.get("hyperedges", []) or []):
         if isinstance(hyperedge, dict) and not hyperedge.get("source_file"):
