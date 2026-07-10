@@ -31,7 +31,7 @@ def _queue_pending(out_dir: Path, changed_paths: list[Path]) -> None:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
     pending = out_dir / _PENDING_FILENAME
-    payload = "".join(f"{os.fspath(p)}\n" for p in changed_paths)
+    payload = "".join(f"{p.as_posix()}\n" for p in changed_paths)
     with open(pending, "a", encoding="utf-8") as fh:
         fh.write(payload)
 
@@ -81,7 +81,7 @@ def _merge_changed_paths(*sources: "list[Path] | None") -> list[Path]:
         if not src:
             continue
         for p in src:
-            key = os.fspath(p)
+            key = p.as_posix()
             if key in seen:
                 continue
             seen.add(key)
@@ -421,6 +421,7 @@ def _rebuild_code(
     follow_symlinks: bool = False,
     force: bool = False,
     no_cluster: bool = False,
+    directed: bool | None = None,
     acquire_lock: bool = True,
     block_on_lock: bool = False,
 ) -> bool:
@@ -441,6 +442,9 @@ def _rebuild_code(
     pile up. Returns False with a log line if the lock is held. Pass
     ``block_on_lock=True`` to wait instead of skip (used by the interactive
     ``graphify update`` CLI).
+
+    ``directed`` forces the rebuilt graph direction. When omitted, an existing
+    graph.json's directed flag is preserved; new graphs default to undirected.
 
     ``no_cluster`` skips community detection and writes raw merged extraction
     JSON to graphify-out/graph.json (mirrors ``extract --no-cluster``).
@@ -478,6 +482,7 @@ def _rebuild_code(
                 follow_symlinks=follow_symlinks,
                 force=force,
                 no_cluster=no_cluster,
+                directed=directed,
                 acquire_lock=False,
             )
             # Late-arrival drain: another hook may have queued work while we
@@ -495,6 +500,7 @@ def _rebuild_code(
                         follow_symlinks=follow_symlinks,
                         force=force,
                         no_cluster=no_cluster,
+                        directed=directed,
                         acquire_lock=False,
                     ) and ok
             return ok
@@ -593,11 +599,14 @@ def _rebuild_code(
         # otherwise the old nodes for those files would survive forever.
         existing_graph = out / "graph.json"
         existing_graph_data: dict = {}
+        effective_directed = bool(directed) if directed is not None else False
         if existing_graph.exists():
             try:
                 check_graph_file_size_cap(existing_graph)
                 existing = json.loads(existing_graph.read_text(encoding="utf-8"))
                 existing_graph_data = existing
+                if directed is None:
+                    effective_directed = bool(existing.get("directed", False))
                 new_ast_ids = {n["id"] for n in result["nodes"]}
                 _relativize_source_files(existing, project_root)
                 evict_sources: set[str] = set(deleted_paths)
@@ -715,6 +724,7 @@ def _rebuild_code(
             from graphify.build import dedupe_edges as _dedupe_edges, dedupe_nodes as _dedupe_nodes
             candidate_graph_data = {
                 **{k: v for k, v in result.items() if k not in ("edges", "nodes")},
+                "directed": effective_directed,
                 "nodes": _dedupe_nodes(result.get("nodes", [])),
                 "links": _dedupe_edges(result.get("edges", [])),
             }
@@ -767,7 +777,7 @@ def _rebuild_code(
             "total_words": detected.get("total_words", 0),
         }
 
-        G = build_from_json(result)
+        G = build_from_json(result, directed=effective_directed)
         candidate_topology = _topology_from_graph(G)
         if existing_graph_data:
             try:

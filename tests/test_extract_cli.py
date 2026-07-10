@@ -503,6 +503,135 @@ def test_extract_codeonly_succeeds_without_api_key(monkeypatch, tmp_path):
     assert len(json.loads(graph.read_text()).get("nodes", [])) > 0
 
 
+def test_extract_directed_writes_directed_graph(monkeypatch, tmp_path):
+    corpus = _code_only_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    _clear_backend_keys(monkeypatch)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus), "--out", str(out_dir), "--directed"],
+    )
+
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
+
+    import json
+
+    graph = json.loads((out_dir / "graphify-out" / "graph.json").read_text())
+    assert graph["directed"] is True
+
+
+def test_update_preserves_directed_graph(monkeypatch, tmp_path):
+    corpus = _code_only_corpus(tmp_path)
+    _clear_backend_keys(monkeypatch)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus), "--directed"],
+    )
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
+
+    (corpus / "auth.py").write_text(
+        "def login(user):\n    return validate(user)\n\n"
+        "def validate(user):\n    return True\n\n"
+        "def logout(user):\n    return True\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "update", str(corpus)],
+    )
+
+    mainmod.main()
+
+    import json
+
+    graph = json.loads((corpus / "graphify-out" / "graph.json").read_text())
+    assert graph["directed"] is True
+    assert "logout()" in {node.get("label") for node in graph["nodes"]}
+
+
+def test_update_directed_option_forces_directed_graph(monkeypatch, tmp_path):
+    corpus = _code_only_corpus(tmp_path)
+    _clear_backend_keys(monkeypatch)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus)],
+    )
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
+
+    (corpus / "auth.py").write_text(
+        "def login(user):\n    return validate(user)\n\n"
+        "def validate(user):\n    return True\n\n"
+        "def logout(user):\n    return True\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "update", str(corpus), "--directed"],
+    )
+
+    mainmod.main()
+
+    import json
+
+    graph = json.loads((corpus / "graphify-out" / "graph.json").read_text())
+    assert graph["directed"] is True
+
+
+def test_incremental_extract_preserves_directed_graph(monkeypatch, tmp_path):
+    corpus = _code_only_corpus(tmp_path)
+    _clear_backend_keys(monkeypatch)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus), "--directed"],
+    )
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
+
+    (corpus / "auth.py").write_text(
+        "def login(user):\n    return validate(user)\n\n"
+        "def validate(user):\n    return True\n\n"
+        "def logout(user):\n    return True\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus)],
+    )
+
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
+
+    import json
+
+    graph = json.loads((corpus / "graphify-out" / "graph.json").read_text())
+    assert graph["directed"] is True
+    assert "logout()" in {node.get("label") for node in graph["nodes"]}
+
+
 def test_extract_out_keeps_project_root_clean(monkeypatch, tmp_path):
     """`extract --out DIR` routes every artifact to DIR/graphify-out/ and the
     scanned project must not grow a graphify-out/ (or anything else) beside

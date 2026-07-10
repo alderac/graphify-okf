@@ -2439,6 +2439,8 @@ def main() -> None:
         print("    --force                 overwrite graph.json even if the rebuild has fewer nodes")
         print("                            (also: GRAPHIFY_FORCE=1 env var; use after refactors that delete code)")
         print("    --no-cluster            skip clustering, write raw extraction only")
+        print("    --directed              write a directed graph (default preserves existing graph.json)")
+        print("    --undirected            write an undirected graph")
         print("  cluster-only <path>     rerun clustering on an existing graph.json and regenerate report")
         print("    --no-viz                skip graph.html generation (useful for >5000 node graphs / CI)")
         print("    --graph <path>          path to graph.json (default <path>/graphify-out/graph.json)")
@@ -2510,6 +2512,8 @@ def main() -> None:
         print("                            maps tables, views, functions + FK relationships;")
         print("                            column-level detail is not represented in the graph")
         print("    --cargo                 extract crate→crate deps from Cargo.toml")
+        print("    --directed              build directed graph output")
+        print("    --undirected            build undirected graph output (default unless existing output is directed)")
         print("    --global                also merge the resulting graph into the global graph")
         print("    --as <tag>              repo tag for --global (default: target directory name)")
         print("  global add <graph.json>  add/update a project graph in the global graph (~/.graphify/global-graph.json)")
@@ -3869,6 +3873,7 @@ def main() -> None:
     elif cmd == "update":
         force = os.environ.get("GRAPHIFY_FORCE", "").lower() in ("1", "true", "yes")
         no_cluster = False
+        directed: bool | None = None
         args = sys.argv[2:]
         watch_arg: str | None = None
         for a in args:
@@ -3877,6 +3882,12 @@ def main() -> None:
                 continue
             if a == "--no-cluster":
                 no_cluster = True
+                continue
+            if a == "--directed":
+                directed = True
+                continue
+            if a == "--undirected":
+                directed = False
                 continue
             if a.startswith("-"):
                 print(f"error: unknown update option: {a}", file=sys.stderr)
@@ -3904,7 +3915,13 @@ def main() -> None:
         # Interactive CLI: block on the per-repo lock rather than skip, so the
         # user sees their explicit `graphify update` complete instead of
         # exiting silently when a hook-driven rebuild happens to be running.
-        ok = _rebuild_code(watch_path, force=force, no_cluster=no_cluster, block_on_lock=True)
+        ok = _rebuild_code(
+            watch_path,
+            force=force,
+            no_cluster=no_cluster,
+            directed=directed,
+            block_on_lock=True,
+        )
         if ok:
             print("Code graph updated. For doc/paper/image changes run /graphify --update in your AI assistant.")
             if not (
@@ -4525,7 +4542,8 @@ def main() -> None:
                 "Usage: graphify extract <path> [--backend gemini|kimi|claude|openai|deepseek|ollama] "
                 "[--model M] [--mode deep] [--out DIR] [--google-workspace] [--no-cluster] "
                 "[--max-workers N] [--token-budget N] [--max-concurrency N] "
-                "[--api-timeout S] [--postgres DSN] [--cargo] [--timing] [--strict|--seed]",
+                "[--api-timeout S] [--postgres DSN] [--cargo] [--directed|--undirected] "
+                "[--timing] [--strict|--seed]",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -4563,6 +4581,7 @@ def main() -> None:
         cli_timing: bool = False
         strict_mode = False
         seed_mode = False
+        cli_directed: bool | None = None
 
         def _parse_int(name: str, raw: str) -> int:
             try:
@@ -4653,6 +4672,10 @@ def main() -> None:
                 i += 1
             elif a == "--timing":
                 cli_timing = True; i += 1
+            elif a == "--directed":
+                cli_directed = True; i += 1
+            elif a == "--undirected":
+                cli_directed = False; i += 1
             elif a == "--strict":
                 strict_mode = True; i += 1
             elif a == "--seed":
@@ -4724,6 +4747,19 @@ def main() -> None:
         manifest_path = graphify_out / "manifest.json"
         existing_graph_path = graphify_out / "graph.json"
         incremental_mode = manifest_path.exists() and existing_graph_path.exists() if has_path else False
+        if cli_directed is not None:
+            effective_directed = cli_directed
+        elif existing_graph_path.exists():
+            try:
+                from graphify.security import check_graph_file_size_cap as _check_existing_graph_cap
+                _check_existing_graph_cap(existing_graph_path)
+                effective_directed = bool(
+                    json.loads(existing_graph_path.read_text(encoding="utf-8")).get("directed", False)
+                )
+            except Exception:
+                effective_directed = False
+        else:
+            effective_directed = False
 
         if not has_path:
             code_files = []
@@ -5171,6 +5207,7 @@ def main() -> None:
 
             merged["nodes"] = _dedupe_nodes(merged["nodes"])
             merged["edges"] = _dedupe_edges(merged["edges"])
+            merged["directed"] = effective_directed
             _backup(graphify_out)
             graph_json_path.write_text(
                 json.dumps(merged, indent=2), encoding="utf-8"
@@ -5229,9 +5266,16 @@ def main() -> None:
                 dedup=True,
                 dedup_llm_backend=dedup_backend,
                 root=target,
+                directed=effective_directed,
             )
         else:
-            G = _build([merged], dedup=True, dedup_llm_backend=dedup_backend, root=target)
+            G = _build(
+                [merged],
+                dedup=True,
+                dedup_llm_backend=dedup_backend,
+                root=target,
+                directed=effective_directed,
+            )
         stages.mark("build")
         if G.number_of_nodes() == 0:
             _write_audit_and_exit(
