@@ -523,13 +523,13 @@ def test_rebuild_code_evicts_removed_symbol_from_surviving_file(tmp_path):
     assert "AuthConcept" in after, "semantic node on a surviving file must not be evicted"
 
 
-def test_rebuild_code_preupgrade_marker_less_node_one_cycle_lag(tmp_path):
-    """#1118 backward-compat: a graph.json built before #1116 has no `_origin`
-    markers. On the first `graphify update` after upgrading, a symbol removed
-    from a surviving file is NOT pruned that cycle — its old node carries no
-    marker, so the new drop-rule skips it. This is a deliberate one-cycle lag
-    (no data loss); it self-heals once the node has been stamped `_origin="ast"`
-    (which a full re-extraction does for every surviving symbol)."""
+def test_rebuild_code_conservatively_retains_preupgrade_marker_less_node(tmp_path):
+    """AST-only updates retain legacy records whose ownership is ambiguous.
+
+    A fresh full graph or seed may replace them, but repeated AST-only updates
+    must treat the source graph as authoritative rather than guessing that an
+    unmarked node is safe to delete.
+    """
     import json
     from graphify.watch import _rebuild_code
 
@@ -557,29 +557,21 @@ def test_rebuild_code_preupgrade_marker_less_node_one_cycle_lag(tmp_path):
     })
     graph_path.write_text(json.dumps(data), encoding="utf-8")
 
-    # First update after "upgrade" (full rebuild, no changed_paths): the stale
-    # node has no marker, so the drop-rule skips it and it survives this cycle.
+    # The marker-less node is ambiguous, so an AST-only update retains it.
     assert _rebuild_code(corpus, acquire_lock=False, force=True) is True
     after = json.loads(graph_path.read_text(encoding="utf-8"))
     assert "foo()" in labels(after), (
-        "pre-upgrade marker-less stale node must survive the first update — "
-        "documented one-cycle backward-compat lag (#1118)"
+        "pre-upgrade marker-less node must remain while the source graph is authoritative"
     )
 
-    # Once stamped (a full re-extraction stamps every surviving symbol), the
-    # drop-rule applies on the next update and the stale node self-heals away.
-    for n in after["nodes"]:
-        if n["label"] == "foo()":
-            n["_origin"] = "ast"
-    graph_path.write_text(json.dumps(after), encoding="utf-8")
-
+    # A later AST-only update has no additional ownership evidence and must
+    # retain the same ambiguous record until a fresh full graph/seed replaces it.
     assert _rebuild_code(corpus, acquire_lock=False, force=True) is True
-    healed = json.loads(graph_path.read_text(encoding="utf-8"))
-    assert "foo()" not in labels(healed), (
-        "once carrying _origin=ast, the stale node is pruned on the next "
-        "update (self-heal)"
+    repeated = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert "foo()" in labels(repeated), (
+        "repeated AST-only updates must not invent ownership for marker-less legacy nodes"
     )
-    assert "bar()" in labels(healed), "surviving symbol must be kept throughout"
+    assert "bar()" in labels(repeated), "surviving symbol must be kept throughout"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fcntl-only (POSIX)")

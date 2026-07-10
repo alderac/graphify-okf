@@ -662,8 +662,10 @@ def _rebuild_code(
 
                 # Re-extraction replaces AST-owned nodes from its own sources;
                 # semantic nodes for present documents survive until semantic
-                # extraction refreshes them. Marker-less legacy nodes remain for
-                # one compatibility cycle, as with the existing full-update rule.
+                # extraction refreshes them. Marker-less legacy nodes are
+                # conservatively retained by AST-only updates because their
+                # ownership is ambiguous; the source graph remains authoritative
+                # until a fresh full graph or seed replaces them.
                 preserved_nodes = [
                     n for n in existing.get("nodes", [])
                     if n["id"] not in new_ast_ids
