@@ -15852,6 +15852,11 @@ def extract(
     # even when its source file still exists (#1116).
     for n in all_nodes:
         n["_origin"] = "ast"
+    # Edges need the same ownership marker as nodes. A source file may produce
+    # both AST structure and semantic relationships, so source_file alone is
+    # not enough for an incremental rebuild to decide which edges it replaces.
+    for e in all_edges:
+        e["_origin"] = "ast"
 
     return {
         "nodes": all_nodes,

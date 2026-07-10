@@ -59,6 +59,19 @@ def test_extract_merges_multiple_files():
     assert result["input_tokens"] == 0
 
 
+def test_extract_marks_mixed_code_and_markdown_edges_as_ast_owned(tmp_path):
+    """AST edge ownership must survive the merge with semantic graph content."""
+    app = tmp_path / "app.py"
+    context = tmp_path / "CONTEXT.md"
+    app.write_text("def run():\n    return 1\n", encoding="utf-8")
+    context.write_text("# Workflow\n\nUse `run()`.\n", encoding="utf-8")
+
+    result = extract([app, context], cache_root=tmp_path)
+
+    assert result["edges"], "mixed extraction should produce structural edges"
+    assert {edge.get("_origin") for edge in result["edges"]} == {"ast"}
+
+
 def test_extract_disambiguates_duplicate_symbol_ids_by_source_path(tmp_path):
     first = tmp_path / "apps/api/Program.cs"
     second = tmp_path / "tools/api/Program.cs"

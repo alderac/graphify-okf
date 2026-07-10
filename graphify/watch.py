@@ -519,17 +519,16 @@ def _rebuild_code(
         from graphify.security import check_graph_file_size_cap
 
         detected = detect(watch_path, follow_symlinks=follow_symlinks)
-        code_files = [Path(f) for f in detected['files']['code']]
-
-        # Include document files that have AST extractors (e.g. .md, .mdx, .qmd)
-        for doc_file in detected['files'].get('document', []):
-            p = Path(doc_file)
-            if _get_extractor(p) is not None:
-                code_files.append(p)
-
-        if not code_files:
-            print("[graphify watch] No code files found - nothing to rebuild.")
-            return False
+        code_ast_files = [Path(f) for f in detected['files']['code']]
+        document_files = [Path(f) for f in detected['files'].get('document', [])]
+        document_ast_files = [p for p in document_files if _get_extractor(p) is not None]
+        # Markdown remains an AST target even though it is also a semantic input.
+        ast_files = code_ast_files + document_ast_files
+        semantic_files = document_files + [
+            Path(f)
+            for kind in ('paper', 'image', 'video')
+            for f in detected['files'].get(kind, [])
+        ]
 
         # Incremental path: when the caller passed an explicit change list,
         # extract only changed-and-still-existing files. Deleted paths are
@@ -539,8 +538,10 @@ def _rebuild_code(
             for root in (project_root, watch_root):
                 deleted_paths.add(_nsf(str(path), str(root)) or str(path))
 
+        semantic_changed = False
         if changed_paths is not None:
-            code_set = {p.resolve() for p in code_files}
+            ast_set = {p.resolve() for p in ast_files}
+            semantic_set = {p.resolve() for p in semantic_files}
             wanted: list[Path] = []
             change_root = Path.cwd().resolve()
             for raw in changed_paths:
@@ -549,12 +550,6 @@ def _rebuild_code(
                     change_root=change_root,
                     watch_root=watch_root,
                 )
-                tracked = next((cand for cand in candidates if cand.exists() and cand in code_set), None)
-                if tracked is not None:
-                    if tracked not in wanted:
-                        wanted.append(tracked)
-                    continue
-
                 existing_in_root = next(
                     (
                         cand for cand in candidates
@@ -563,9 +558,14 @@ def _rebuild_code(
                     None,
                 )
                 if existing_in_root is not None:
-                    # The path exists under the watched root but detect filtered
-                    # it out. Evict any stale nodes that still claim it.
-                    _add_deleted_source(existing_in_root)
+                    # A present document is semantic work, never a deletion. It
+                    # may additionally have an AST extractor (Markdown), in which
+                    # case its structural graph is refreshed while its semantic
+                    # edges stay pending for the skill-led update.
+                    if existing_in_root in semantic_set:
+                        semantic_changed = True
+                    if existing_in_root in ast_set and existing_in_root not in wanted:
+                        wanted.append(existing_in_root)
                     continue
 
                 deleted_in_root = next(
@@ -577,11 +577,18 @@ def _rebuild_code(
                     # Evict preserved nodes that still claim this source path.
                     _add_deleted_source(deleted_in_root)
             if not wanted and not deleted_paths:
+                if semantic_changed:
+                    _notify_only(watch_path)
+                    return True
                 print("[graphify watch] No tracked code files in change set - skipping rebuild.")
                 return True
             extract_targets = wanted
         else:
-            extract_targets = code_files
+            extract_targets = ast_files
+
+        if not extract_targets and not deleted_paths and not (out / "graph.json").exists():
+            print("[graphify watch] No AST files found - nothing to rebuild.")
+            return False
 
         commit = _git_head()
         result = extract(extract_targets, cache_root=watch_root) if extract_targets else {
@@ -609,77 +616,77 @@ def _rebuild_code(
                     effective_directed = bool(existing.get("directed", False))
                 new_ast_ids = {n["id"] for n in result["nodes"]}
                 _relativize_source_files(existing, project_root)
-                evict_sources: set[str] = set(deleted_paths)
-                if changed_paths is not None:
-                    for p in extract_targets:
-                        for root in (project_root, watch_root):
-                            evict_sources.add(_nsf(str(p), str(root)) or str(p))
-                else:
-                    # Full re-extraction: reconcile against current code files to
-                    # evict nodes from files deleted since the last run (#1007).
-                    _root_str = str(project_root)
-                    current_sources = {
-                        _nsf(str(p.relative_to(project_root)), _root_str)
-                        for p in code_files
-                        if p.is_relative_to(project_root)
+                def _source_keys(path: Path) -> set[str]:
+                    return {
+                        _nsf(str(path), str(root)) or str(path)
+                        for root in (project_root, watch_root)
                     }
-                    for n in existing.get("nodes", []):
-                        sf = n.get("source_file")
-                        if not sf:
-                            continue
-                        if Path(sf).suffix.lower() not in _CODE_EXTENSIONS:
-                            continue
-                        norm = _nsf(sf, _root_str)
-                        if norm not in current_sources:
-                            evict_sources.add(sf)
-                            evict_sources.add(norm)
-                            deleted_paths.add(norm)
-                # On a full re-extraction every code file is re-extracted, so
-                # new_ast_ids is the complete current AST set. Any AST-marked node
-                # missing from it is stale and must be dropped even if its source
-                # file still exists (a symbol removed from a surviving file, #1116).
-                # Gate on full_rebuild: in incremental mode an AST node from an
-                # unchanged file is legitimately absent from new_ast_ids. Semantic
-                # nodes lack the "_origin" marker, so they are never dropped here —
-                # only by the deleted-file eviction in evict_sources above.
-                full_rebuild = changed_paths is None
+
+                reextracted_ast_sources: set[str] = set()
+                reextracted_code_sources: set[str] = set()
+                code_ast_set = {p.resolve() for p in code_ast_files}
+                for p in extract_targets:
+                    keys = _source_keys(p)
+                    reextracted_ast_sources.update(keys)
+                    if p.resolve() in code_ast_set:
+                        reextracted_code_sources.update(keys)
+
+                if changed_paths is None:
+                    # A direct update reconciles every detected source, including
+                    # documents. Missing sources are truly deleted and must evict
+                    # every prior node and edge that they owned.
+                    current_sources: set[str] = set()
+                    for paths in detected["files"].values():
+                        for source in paths:
+                            current_sources.update(_source_keys(Path(source)))
+                    prior_owned_records = (
+                        existing.get("nodes", []),
+                        existing.get("links", existing.get("edges", [])),
+                    )
+                    for records in prior_owned_records:
+                        for record in records:
+                            sf = record.get("source_file")
+                            if not sf:
+                                continue
+                            norm = _nsf(sf, str(project_root))
+                            if norm and norm not in current_sources:
+                                deleted_paths.add(norm)
+
+                def _source_matches(source_file: object, sources: set[str]) -> bool:
+                    if not isinstance(source_file, str):
+                        return False
+                    if source_file in sources:
+                        return True
+                    norm = _nsf(source_file, str(project_root))
+                    return bool(norm) and norm in sources
+
+                # Re-extraction replaces AST-owned nodes from its own sources;
+                # semantic nodes for present documents survive until semantic
+                # extraction refreshes them. Marker-less legacy nodes remain for
+                # one compatibility cycle, as with the existing full-update rule.
                 preserved_nodes = [
                     n for n in existing.get("nodes", [])
                     if n["id"] not in new_ast_ids
-                    and not (full_rebuild and n.get("_origin") == "ast")
-                    and (not evict_sources or n.get("source_file") not in evict_sources)
+                    and not _source_matches(n.get("source_file"), deleted_paths)
+                    and not (
+                        n.get("_origin") == "ast"
+                        and _source_matches(n.get("source_file"), reextracted_ast_sources)
+                    )
                 ]
                 all_ids = new_ast_ids | {n["id"] for n in preserved_nodes}
-                # An edge is OWNED by the file it was extracted from (its
-                # source_file). When that file is re-extracted, its prior edges must
-                # not be carried forward — the fresh extraction re-emits whichever
-                # ones still exist. Preserving by endpoint membership alone keeps a
-                # removed import's edge alive forever whenever both endpoint nodes
-                # survive (e.g. `a` no longer imports from `b`, but both `a` and `b`
-                # are still present), producing phantom circular dependencies
-                # (#1521). So drop preserved edges whose source_file was re-extracted
-                # this run (or deleted). Unlike the node-level evict set, this MUST
-                # cover the full-rebuild case too — there every file is re-extracted
-                # but `evict_sources` only lists deleted files, so a removed import
-                # in a surviving file would never be pruned. Edges with no
-                # source_file, or owned by a file that was NOT re-extracted, are
-                # kept exactly as before, so cross-file edges that merely point at a
-                # re-extracted file (#1402 sourceless stubs / cross-file rewire) are
-                # not over-pruned — only edges the re-extracted file itself produced.
-                edge_evict_sources: set[str] = set(evict_sources)
-                for p in extract_targets:
-                    for _root in (project_root, watch_root):
-                        edge_evict_sources.add(_nsf(str(p), str(_root)) or str(p))
                 def _edge_evicted(e: dict) -> bool:
-                    if not edge_evict_sources:
-                        return False
                     sf = e.get("source_file")
-                    if not sf:
-                        return False
-                    if sf in edge_evict_sources:
+                    if _source_matches(sf, deleted_paths):
                         return True
-                    norm = _nsf(sf, str(project_root))
-                    return bool(norm) and norm in edge_evict_sources
+                    if not _source_matches(sf, reextracted_ast_sources):
+                        return False
+                    if e.get("_origin") == "ast":
+                        return True
+                    # Older graph.json files have marker-less AST edges. Keep the
+                    # legacy source fallback for code to prune stale imports, but
+                    # preserve marker-less document edges because they may be
+                    # semantic relationships that cannot safely be re-created here.
+                    return _source_matches(sf, reextracted_code_sources)
                 preserved_edges = [
                     e for e in existing.get("links", existing.get("edges", []))
                     if e.get("source") in all_ids and e.get("target") in all_ids
@@ -703,12 +710,19 @@ def _rebuild_code(
         if changed_paths is None:
             rebuilt_sources = {
                 _nsf(str(p.relative_to(project_root)), _rebuilt_root)
-                for p in code_files if p.is_relative_to(project_root)
+                for p in ast_files if p.is_relative_to(project_root)
             }
         else:
             rebuilt_sources = {(_nsf(str(p), _rebuilt_root) or str(p)) for p in extract_targets}
         rebuilt_sources |= set(deleted_paths)
         out.mkdir(exist_ok=True)
+
+        # AST-only rebuilds can queue semantic work, but cannot prove that any
+        # previously queued work was consumed by the skill-led update path.
+        def _record_semantic_update_pending() -> None:
+            if semantic_changed:
+                _notify_only(watch_path)
+
         # Write the user-supplied path rather than the resolved absolute form
         # so a committed ``graphify-out/.graphify_root`` is portable across
         # clones and CI runners (#777). When ``watch_path`` is ``.`` (the
@@ -755,10 +769,7 @@ def _rebuild_code(
             except Exception:
                 pass
 
-            # clear stale needs_update flag if present
-            flag = out / "needs_update"
-            if flag.exists():
-                flag.unlink()
+            _record_semantic_update_pending()
 
             if same_graph:
                 print("[graphify watch] No code-graph changes detected (--no-cluster); outputs left untouched.")
@@ -772,8 +783,12 @@ def _rebuild_code(
             return True
 
         detection = {
-            "files": {"code": [str(f) for f in code_files], "document": [], "paper": [], "image": []},
-            "total_files": len(code_files),
+            "files": {
+                "code": [str(f) for f in code_ast_files],
+                "document": [str(f) for f in document_ast_files],
+                "paper": [], "image": [],
+            },
+            "total_files": len(ast_files),
             "total_words": detected.get("total_words", 0),
         }
 
@@ -793,9 +808,7 @@ def _rebuild_code(
                     save_manifest(detected["files"], kind="ast", root=project_root)
                 except Exception:
                     pass
-                flag = out / "needs_update"
-                if flag.exists():
-                    flag.unlink()
+                _record_semantic_update_pending()
                 print("[graphify watch] No code-graph topology changes detected; outputs left untouched.")
                 return True
 
@@ -900,10 +913,7 @@ def _rebuild_code(
             except Exception as cf_err:
                 print(f"[graphify watch] callflow HTML update skipped: {cf_err}")
 
-        # clear stale needs_update flag if present
-        flag = out / "needs_update"
-        if flag.exists():
-            flag.unlink()
+        _record_semantic_update_pending()
 
         if not no_change:
             print(f"[graphify watch] Rebuilt: {G.number_of_nodes()} nodes, "

@@ -10,6 +10,58 @@ import pytest
 from graphify.watch import _notify_only, _WATCHED_EXTENSIONS, _rebuild_lock, _check_shrink
 
 
+def _seed_mixed_ast_and_semantic_document_graph(corpus: Path) -> tuple[Path, str, str, str]:
+    """Seed graph.json from real AST output plus one semantic document edge."""
+    from graphify.extract import extract
+
+    app = corpus / "app.py"
+    context = corpus / "CONTEXT.md"
+    app.write_text("def run():\n    return 1\n", encoding="utf-8")
+    context.write_text("# Workflow\n\nUse `run()`.\n", encoding="utf-8")
+    ast = extract([app, context], cache_root=corpus)
+
+    context_file_id = next(node["id"] for node in ast["nodes"] if node["label"] == "CONTEXT.md")
+    context_heading_id = next(node["id"] for node in ast["nodes"] if node["label"] == "Workflow")
+    run_id = next(node["id"] for node in ast["nodes"] if node["label"] == "run()")
+    semantic_id = "document_intent"
+    ast["nodes"].append({
+        "id": semantic_id,
+        "label": "Document intent",
+        "file_type": "concept",
+        "source_file": "CONTEXT.md",
+    })
+    ast["edges"].extend([
+        {
+            "source": context_file_id,
+            "target": semantic_id,
+            "relation": "guides",
+            "confidence": "INFERRED",
+            "source_file": "CONTEXT.md",
+        },
+        {
+            "source": context_file_id,
+            "target": run_id,
+            "relation": "obsolete_ast_link",
+            "confidence": "EXTRACTED",
+            "source_file": "CONTEXT.md",
+            "_origin": "ast",
+        },
+    ])
+    out = corpus / "graphify-out"
+    out.mkdir(exist_ok=True)
+    graph_path = out / "graph.json"
+    graph_path.write_text(json.dumps({
+        "directed": True,
+        "nodes": ast["nodes"],
+        "links": ast["edges"],
+    }), encoding="utf-8")
+    return graph_path, context_heading_id, semantic_id, run_id
+
+
+def _graph_edges(graph: dict) -> list[dict]:
+    return graph.get("links", graph.get("edges", []))
+
+
 # --- _notify_only ---
 
 def test_notify_only_creates_flag(tmp_path):
@@ -173,6 +225,200 @@ def test_graphify_root_preserves_absolute_when_user_supplied(tmp_path):
     saved = (corpus / "graphify-out" / ".graphify_root").read_text(encoding="utf-8")
     assert saved == str(corpus), (
         f"absolute caller path must be preserved as-is; got {saved!r}"
+    )
+
+
+def test_full_rebuild_preserves_semantic_document_edges_and_replaces_ast_edges(tmp_path):
+    """Direct ``graphify update`` keeps mixed Markdown AST and semantic output."""
+    from graphify.watch import _rebuild_code
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    graph_path, _old_heading_id, semantic_id, run_id = _seed_mixed_ast_and_semantic_document_graph(corpus)
+    (corpus / "app.py").write_text("def updated_run():\n    return 2\n", encoding="utf-8")
+
+    assert _rebuild_code(corpus, directed=True, no_cluster=True, acquire_lock=False) is True
+
+    rebuilt = json.loads(graph_path.read_text(encoding="utf-8"))
+    labels = {node["label"] for node in rebuilt["nodes"]}
+    edges = _graph_edges(rebuilt)
+    assert rebuilt["directed"] is True
+    assert {"CONTEXT.md", "Workflow", "updated_run()", "Document intent"} <= labels
+    assert any(edge.get("relation") == "guides" and edge.get("target") == semantic_id for edge in edges)
+    assert not any(edge.get("relation") == "obsolete_ast_link" for edge in edges)
+    assert all(
+        edge.get("_origin") == "ast"
+        for edge in edges
+        if edge.get("source_file") == "CONTEXT.md" and edge.get("relation") == "contains"
+    )
+    assert run_id not in {node["id"] for node in rebuilt["nodes"]}
+
+
+def test_changed_markdown_rebuild_preserves_semantic_content_and_marks_pending(tmp_path):
+    """The hook's ``changed_paths`` route treats a present document as semantic work."""
+    from graphify.watch import _rebuild_code
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    graph_path, _old_heading_id, semantic_id, _run_id = _seed_mixed_ast_and_semantic_document_graph(corpus)
+    context = corpus / "CONTEXT.md"
+    context.write_text("# Updated workflow\n\nUse `run()`.\n", encoding="utf-8")
+
+    assert _rebuild_code(
+        corpus,
+        changed_paths=[Path("CONTEXT.md")],
+        directed=True,
+        no_cluster=True,
+        acquire_lock=False,
+    ) is True
+
+    rebuilt = json.loads(graph_path.read_text(encoding="utf-8"))
+    labels = {node["label"] for node in rebuilt["nodes"]}
+    edges = _graph_edges(rebuilt)
+    assert {"CONTEXT.md", "Updated workflow", "Document intent"} <= labels
+    assert any(edge.get("relation") == "guides" and edge.get("target") == semantic_id for edge in edges)
+    assert not any(edge.get("relation") == "obsolete_ast_link" for edge in edges)
+    assert (corpus / "graphify-out" / "needs_update").read_text(encoding="utf-8") == "1"
+
+
+def test_later_code_rebuild_preserves_pending_semantic_document_update(tmp_path):
+    """AST-only work must not consume semantic work queued by an earlier batch."""
+    from graphify.watch import _rebuild_code
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    graph_path, _old_heading_id, semantic_id, run_id = _seed_mixed_ast_and_semantic_document_graph(corpus)
+    (corpus / "CONTEXT.md").write_text(
+        "# Updated workflow\n\nUse `run()`.\n",
+        encoding="utf-8",
+    )
+
+    assert _rebuild_code(
+        corpus,
+        changed_paths=[Path("CONTEXT.md")],
+        directed=True,
+        no_cluster=True,
+        acquire_lock=False,
+    ) is True
+    flag = corpus / "graphify-out" / "needs_update"
+    assert flag.read_text(encoding="utf-8") == "1"
+
+    (corpus / "app.py").write_text("def updated_run():\n    return 2\n", encoding="utf-8")
+    assert _rebuild_code(
+        corpus,
+        changed_paths=[Path("app.py")],
+        directed=True,
+        no_cluster=True,
+        acquire_lock=False,
+    ) is True
+
+    rebuilt = json.loads(graph_path.read_text(encoding="utf-8"))
+    labels = {node["label"] for node in rebuilt["nodes"]}
+    edges = _graph_edges(rebuilt)
+    assert "updated_run()" in labels
+    assert run_id not in {node["id"] for node in rebuilt["nodes"]}
+    assert any(edge.get("relation") == "guides" and edge.get("target") == semantic_id for edge in edges)
+    assert flag.read_text(encoding="utf-8") == "1"
+
+
+def test_code_only_rebuild_without_pending_semantic_work_leaves_marker_absent(tmp_path):
+    """Normal AST-only work does not create semantic update state."""
+    from graphify.watch import _rebuild_code
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    graph_path, _old_heading_id, _semantic_id, run_id = _seed_mixed_ast_and_semantic_document_graph(corpus)
+    flag = corpus / "graphify-out" / "needs_update"
+    assert not flag.exists()
+
+    (corpus / "app.py").write_text("def updated_run():\n    return 2\n", encoding="utf-8")
+    assert _rebuild_code(
+        corpus,
+        changed_paths=[Path("app.py")],
+        directed=True,
+        no_cluster=True,
+        acquire_lock=False,
+    ) is True
+
+    rebuilt = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert "updated_run()" in {node["label"] for node in rebuilt["nodes"]}
+    assert run_id not in {node["id"] for node in rebuilt["nodes"]}
+    assert not flag.exists()
+
+
+def test_mixed_code_and_document_rebuild_refreshes_ast_and_keeps_semantic_pending(tmp_path):
+    """A mixed hook batch refreshes code without consuming semantic work."""
+    from graphify.watch import _rebuild_code
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    graph_path, _old_heading_id, semantic_id, run_id = _seed_mixed_ast_and_semantic_document_graph(corpus)
+    (corpus / "app.py").write_text("def updated_run():\n    return 2\n", encoding="utf-8")
+    (corpus / "CONTEXT.md").write_text(
+        "# Updated workflow\n\nUse `updated_run()`.\n",
+        encoding="utf-8",
+    )
+
+    assert _rebuild_code(
+        corpus,
+        changed_paths=[Path("app.py"), Path("CONTEXT.md")],
+        directed=True,
+        no_cluster=True,
+        acquire_lock=False,
+    ) is True
+
+    rebuilt = json.loads(graph_path.read_text(encoding="utf-8"))
+    labels = {node["label"] for node in rebuilt["nodes"]}
+    edges = _graph_edges(rebuilt)
+    assert {"updated_run()", "Updated workflow", "Document intent"} <= labels
+    assert run_id not in {node["id"] for node in rebuilt["nodes"]}
+    assert any(edge.get("relation") == "guides" and edge.get("target") == semantic_id for edge in edges)
+    assert (corpus / "graphify-out" / "needs_update").read_text(encoding="utf-8") == "1"
+
+
+def test_full_rebuild_evicts_deleted_source_edge_without_owned_nodes(tmp_path):
+    """A deleted source is discovered from edge ownership, not only nodes."""
+    from graphify.watch import _rebuild_code
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    app = corpus / "app.py"
+    app.write_text(
+        "def first():\n    return 1\n\ndef second():\n    return first()\n",
+        encoding="utf-8",
+    )
+
+    assert _rebuild_code(
+        corpus,
+        directed=True,
+        no_cluster=True,
+        acquire_lock=False,
+    ) is True
+    graph_path = corpus / "graphify-out" / "graph.json"
+    seeded = json.loads(graph_path.read_text(encoding="utf-8"))
+    first_id = next(node["id"] for node in seeded["nodes"] if node["label"] == "first()")
+    second_id = next(node["id"] for node in seeded["nodes"] if node["label"] == "second()")
+    seeded["links"].append({
+        "source": first_id,
+        "target": second_id,
+        "relation": "stale_deleted_document_relation",
+        "confidence": "INFERRED",
+        "source_file": "old.md",
+    })
+    graph_path.write_text(json.dumps(seeded), encoding="utf-8")
+
+    assert _rebuild_code(
+        corpus,
+        directed=True,
+        no_cluster=True,
+        acquire_lock=False,
+    ) is True
+
+    rebuilt = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert {first_id, second_id} <= {node["id"] for node in rebuilt["nodes"]}
+    assert not any(
+        edge.get("relation") == "stale_deleted_document_relation"
+        for edge in _graph_edges(rebuilt)
     )
 
 
