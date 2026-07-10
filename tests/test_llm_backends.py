@@ -259,7 +259,7 @@ def test_call_gemini_native_submits_structured_output_schema(monkeypatch, tmp_pa
     assert config["system_instruction"].startswith("You are a graphify semantic extraction agent")
     assert config["max_output_tokens"] == 321
     assert config["temperature"] == 0
-    assert config["thinking_config"] == {"thinking_level": "low"}
+    assert "thinking_config" not in config
     assert config["response_mime_type"] == "application/json"
     assert config["response_json_schema"] == llm._GEMINI_EXTRACTION_SCHEMA
     assert result["nodes"][0]["id"] == "note_runner"

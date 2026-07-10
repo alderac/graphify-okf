@@ -1144,24 +1144,15 @@ def _call_gemini_native(
     }
     if temperature is not None:
         config["temperature"] = temperature
-    if reasoning_effort:
-        config["thinking_config"] = {"thinking_level": reasoning_effort}
+    # google-genai rejects thinking_config.thinking_level for this path. Keep
+    # reasoning_effort on the OpenAI-compatible route, but omit it here.
+    _ = reasoning_effort
 
-    try:
-        resp = client.models.generate_content(
-            model=model,
-            contents=_gemini_content(user_message, images or [], types),
-            config=config,
-        )
-    except Exception as exc:
-        if "Thinking level is not supported" not in str(exc) or "thinking_config" not in config:
-            raise
-        config.pop("thinking_config", None)
-        resp = client.models.generate_content(
-            model=model,
-            contents=_gemini_content(user_message, images or [], types),
-            config=config,
-        )
+    resp = client.models.generate_content(
+        model=model,
+        contents=_gemini_content(user_message, images or [], types),
+        config=config,
+    )
     if not getattr(resp, "candidates", None):
         raise ValueError("Gemini returned empty or filtered response")
 
