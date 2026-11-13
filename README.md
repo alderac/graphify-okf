@@ -358,6 +358,7 @@ graphify export callflow-html      # Mermaid architecture/call-flow HTML (auto-r
 
 graphify hook install              # auto-rebuild on git commit
 graphify merge-graphs a.json b.json              # combine two graphs
+graphify import-okf ./knowledge                  # consume an OKF bundle as graph.json
 
 graphify prs                       # PR dashboard: CI state, review status, worktree mapping
 graphify prs 42                    # deep dive on PR #42 with graph impact
@@ -366,6 +367,14 @@ graphify prs --conflicts           # PRs sharing graph communities — merge-ord
 ```
 
 See the [full command reference](#full-command-reference) below.
+
+`graphify import-okf` reads OKF concepts, preserves their complete frontmatter,
+maps source-file metadata such as TokenSave's `tokensave_path`, and turns
+Markdown links into graph edges. TokenSave `# Dependencies` retain their edge
+kinds and counts in `tokensave_edge_kinds`. Broken links and unknown metadata
+are tolerated as required by OKF; imports are bounded to 50,000 concepts,
+4 MiB per Markdown file, 64 MiB total and 20,000 expanded YAML nodes per
+frontmatter block. Symbolic links and hidden directories are not followed.
 
 ---
 
