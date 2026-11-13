@@ -2428,6 +2428,8 @@ def main() -> None:
         print("  merge-driver <base> <current> <other>  git merge driver: union-merge two graph.json files (set up via hook install)")
         print("  merge-graphs <g1> <g2>  merge two or more graph.json files into one cross-repo graph")
         print("    --out <path>            output path (default: graphify-out/merged-graph.json)")
+        print("  import-okf <bundle>      import an OKF bundle as a Graphify graph")
+        print("    --out <path>            output path (default: graphify-out/graph.json)")
         print("    --branch <branch>       checkout a specific branch (default: repo default)")
         print("    --out <dir>             clone to a custom directory (default: ~/.graphify/repos/<owner>/<repo>)")
         print("  add <url>               fetch a URL and save it to ./raw, then update the graph")
@@ -4146,6 +4148,33 @@ def main() -> None:
                 i += 1
         local_path = _clone_repo(url, branch=branch, out_dir=out_dir)
         print(local_path)
+
+    elif cmd == "import-okf":
+        if len(sys.argv) < 3:
+            print("Usage: graphify import-okf <bundle> [--out graph.json]", file=sys.stderr)
+            sys.exit(1)
+        _bundle = Path(sys.argv[2])
+        _output = Path(_GRAPHIFY_OUT) / "graph.json"
+        _args = sys.argv[3:]
+        if _args:
+            if len(_args) != 2 or _args[0] != "--out":
+                print("Usage: graphify import-okf <bundle> [--out graph.json]", file=sys.stderr)
+                sys.exit(1)
+            _output = Path(_args[1])
+        from graphify.okf import from_okf_bundle as _from_okf_bundle
+        from graphify.okf import write_graph as _write_okf_graph
+        from yaml import YAMLError as _YAMLError
+
+        try:
+            _graph = _from_okf_bundle(_bundle)
+            _written = _write_okf_graph(_graph, _output)
+        except (OSError, UnicodeError, ValueError, _YAMLError) as exc:
+            print(f"error importing OKF bundle: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(
+            f"Imported OKF bundle: {_graph.number_of_nodes()} nodes, "
+            f"{_graph.number_of_edges()} edges -> {_written}"
+        )
 
     elif cmd == "export":
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
